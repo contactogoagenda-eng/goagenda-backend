@@ -1,0 +1,15 @@
+# Variables de entorno y credenciales (NUNCA subir esto a git)
+.env
+firebase-credentials.json
+
+# Entorno virtual de Python
+venv/
+__pycache__/
+*.pyc
+
+# Archivos del sistema
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
