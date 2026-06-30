@@ -70,7 +70,7 @@ def enviar_notificacion_nueva_cita(fcm_token: str, nombre_cliente: str, servicio
     _enviar_push(
         fcm_token,
         titulo="Nueva cita agendada",
-        cuerpo=f"{nombre_cliente} agendo {servicio} para {fecha_hora_texto}",
+        cuerpo=f"{nombre_cliente} agendó {servicio} para {fecha_hora_texto}",
     )
 
 
@@ -79,7 +79,7 @@ def enviar_notificacion_cita_cancelada(fcm_token: str, nombre_cliente: str, serv
     _enviar_push(
         fcm_token,
         titulo="Cita cancelada",
-        cuerpo=f"{nombre_cliente} cancelo su cita de {servicio} del {fecha_hora_texto}",
+        cuerpo=f"{nombre_cliente} canceló su cita de {servicio} del {fecha_hora_texto}",
     )
 
 
@@ -90,5 +90,5 @@ def enviar_notificacion_cita_reprogramada(
     _enviar_push(
         fcm_token,
         titulo="Cita reprogramada",
-        cuerpo=f"{nombre_cliente} movio su cita de {servicio} del {fecha_anterior_texto} al {fecha_nueva_texto}",
+        cuerpo=f"{nombre_cliente} movió su cita de {servicio} del {fecha_anterior_texto} al {fecha_nueva_texto}",
     )
