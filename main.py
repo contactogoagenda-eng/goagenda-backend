@@ -11,6 +11,7 @@ from routes.business_settings_routes import router as business_settings_router
 from services.db import supabase
 from services.reminder_service import revisar_y_enviar_recordatorios
 from routes.manual_appointments import router as manual_appointments_router
+from routes.baileys_routes import router as baileys_router
 
 
 load_dotenv()
@@ -23,6 +24,7 @@ app.include_router(services_router)
 app.include_router(business_hours_router)
 app.include_router(business_settings_router)
 app.include_router(manual_appointments_router)
+app.include_router(baileys_router)
 
 
 @app.get("/")
