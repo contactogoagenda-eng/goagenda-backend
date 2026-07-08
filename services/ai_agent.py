@@ -548,15 +548,15 @@ def procesar_mensaje(
     )
 
     if esperando_eleccion:
-        historial_sin_marca = historial[:-1]  # quitamos la marca antes de continuar
-
         if not _tiene_intencion_de_agendar(mensaje_cliente):
             print(f"Cliente {client_phone} eligio 'hablar con el equipo' o algo sin intencion de cita, el bot confirma y se detiene.")
             mensaje_confirmacion = "Perfecto, en un momento el equipo te responde 🙌"
-            return mensaje_confirmacion, historial_sin_marca, datetime.now().isoformat()
+            # Historial vacio: si este cliente escribe de nuevo mas tarde,
+            # se tratara como conversacion nueva y volvera a ver el menu.
+            return mensaje_confirmacion, [], datetime.now().isoformat()
 
         # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
-        historial = historial_sin_marca
+        historial = historial[:-1]  # quitamos la marca antes de continuar
         es_primer_mensaje = True
     else:
         es_primer_mensaje = False
