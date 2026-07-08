@@ -548,7 +548,20 @@ def procesar_mensaje(
     )
 
     if esperando_eleccion:
-        if not _tiene_intencion_de_agendar(mensaje_cliente):
+        texto_limpio = mensaje_cliente.strip()
+
+        # Match directo primero (instantaneo, sin depender de la IA): si el
+        # cliente responde literalmente con el numero de la opcion, no hace
+        # falta clasificar nada, evitamos el riesgo de que la IA interprete
+        # mal un mensaje corto como "2".
+        if texto_limpio == "2" or "reservar" in texto_limpio.lower() or "cita" in texto_limpio.lower():
+            quiere_agendar = True
+        elif texto_limpio == "1" or "equipo" in texto_limpio.lower() or "hablar" in texto_limpio.lower():
+            quiere_agendar = False
+        else:
+            quiere_agendar = _tiene_intencion_de_agendar(mensaje_cliente)
+
+        if not quiere_agendar:
             print(f"Cliente {client_phone} eligio 'hablar con el equipo' o algo sin intencion de cita, el bot confirma y se detiene.")
             mensaje_confirmacion = "Perfecto, en un momento el equipo te responde 🙌"
             # Historial vacio: si este cliente escribe de nuevo mas tarde,
