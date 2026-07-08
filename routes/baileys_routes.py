@@ -7,6 +7,7 @@ from services.db import get_business_by_id
 router = APIRouter()
 
 # Historial en memoria por negocio + cliente
+# Cada entrada guarda: {"historial": [...], "ultima_actividad": "iso_timestamp"}
 # (igual que en webhook.py para Meta)
 historiales_baileys = {}
 
@@ -32,16 +33,22 @@ def recibir_mensaje_baileys(data: BaileysMessageInput):
     print(f"[Baileys][{business['name']}] Mensaje de {data.client_phone}: {data.mensaje}")
 
     key = f"{data.business_id}:{data.client_phone}"
-    historial_previo = historiales_baileys.get(key, [])
+    estado_previo = historiales_baileys.get(key, {})
+    historial_previo = estado_previo.get("historial", [])
+    ultima_actividad_previa = estado_previo.get("ultima_actividad")
 
-    respuesta, nuevo_historial = procesar_mensaje(
+    respuesta, nuevo_historial, nueva_ultima_actividad = procesar_mensaje(
         mensaje_cliente=data.mensaje,
         business_id=data.business_id,
         client_phone=data.client_phone,
         historial=historial_previo,
+        ultima_actividad=ultima_actividad_previa,
     )
 
-    historiales_baileys[key] = nuevo_historial
+    historiales_baileys[key] = {
+        "historial": nuevo_historial,
+        "ultima_actividad": nueva_ultima_actividad,
+    }
 
-    # Retorna la respuesta — Baileys la enviará al cliente
+    # Retorna la respuesta — Baileys la enviará al cliente (None = no enviar nada)
     return {"respuesta_ia": respuesta}

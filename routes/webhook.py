@@ -13,6 +13,7 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 router = APIRouter()
 
 # Historial en memoria, separado por negocio + numero de cliente.
+# Cada entrada guarda: {"historial": [...], "ultima_actividad": "iso_timestamp"}
 # (se pierde si el backend se reinicia; para produccion real con varios
 # negocios activos, considerar persistirlo en Supabase mas adelante)
 historiales_whatsapp = {}
@@ -73,18 +74,25 @@ async def receive_message(request: Request):
         print(f"[{business['name']}] Mensaje de {from_number}: {text}")
 
         key = f"{business_id}:{from_number}"
-        historial_previo = historiales_whatsapp.get(key, [])
+        estado_previo = historiales_whatsapp.get(key, {})
+        historial_previo = estado_previo.get("historial", [])
+        ultima_actividad_previa = estado_previo.get("ultima_actividad")
 
-        respuesta, nuevo_historial = procesar_mensaje(
+        respuesta, nuevo_historial, nueva_ultima_actividad = procesar_mensaje(
             mensaje_cliente=text,
             business_id=business_id,
             client_phone=from_number,
             historial=historial_previo,
+            ultima_actividad=ultima_actividad_previa,
         )
 
-        historiales_whatsapp[key] = nuevo_historial
+        historiales_whatsapp[key] = {
+            "historial": nuevo_historial,
+            "ultima_actividad": nueva_ultima_actividad,
+        }
 
-        send_whatsapp_message(to=from_number, text=respuesta, business_phone_number_id=phone_number_id)
+        if respuesta is not None:
+            send_whatsapp_message(to=from_number, text=respuesta, business_phone_number_id=phone_number_id)
 
     except (KeyError, IndexError) as e:
         print("No es un mensaje de texto entrante o el payload no tiene el formato esperado:", e)

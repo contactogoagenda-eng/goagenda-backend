@@ -6,6 +6,7 @@ from services.ai_agent import procesar_mensaje
 router = APIRouter()
 
 # Guardamos el historial en memoria solo para pruebas (se pierde al reiniciar el servidor)
+# Cada entrada: {"historial": [...], "ultima_actividad": "iso_timestamp"}
 historiales_simulados = {}
 
 
@@ -22,16 +23,22 @@ def simulate_message(data: SimulateMessageInput):
     sin necesitar que la API de WhatsApp este funcionando.
     """
     key = f"{data.business_id}:{data.client_phone}"
-    historial_previo = historiales_simulados.get(key, [])
+    estado_previo = historiales_simulados.get(key, {})
+    historial_previo = estado_previo.get("historial", [])
+    ultima_actividad_previa = estado_previo.get("ultima_actividad")
 
-    respuesta, nuevo_historial = procesar_mensaje(
+    respuesta, nuevo_historial, nueva_ultima_actividad = procesar_mensaje(
         mensaje_cliente=data.mensaje,
         business_id=data.business_id,
         client_phone=data.client_phone,
         historial=historial_previo,
+        ultima_actividad=ultima_actividad_previa,
     )
 
-    historiales_simulados[key] = nuevo_historial
+    historiales_simulados[key] = {
+        "historial": nuevo_historial,
+        "ultima_actividad": nueva_ultima_actividad,
+    }
 
     return {"respuesta_ia": respuesta}
 
