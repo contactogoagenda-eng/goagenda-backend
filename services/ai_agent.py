@@ -522,15 +522,43 @@ def procesar_mensaje(
 
     es_conversacion_nueva = not historial or conversacion_vencida
 
+    # Si es conversacion nueva, mostramos un menu simple en vez de responder
+    # directo o quedarnos en silencio. Guardamos una marca en el historial
+    # para saber que estamos esperando la eleccion del cliente (1 o 2).
     if es_conversacion_nueva:
-        if not _tiene_intencion_de_agendar(mensaje_cliente):
-            print(f"Mensaje de {client_phone} sin intencion de agendar (conversacion nueva/vencida), el bot se queda en silencio.")
-            return None, [], datetime.now().isoformat()
-        # Si hubo intencion pero la conversacion anterior ya vencio, empezamos historial limpio
-        if conversacion_vencida:
-            historial = []
+        mensaje_menu = (
+            f"¡Hola! Bienvenido a {nombre_negocio} 👋\n\n"
+            "1️⃣ Hablar con el equipo\n"
+            "2️⃣ Reservar una cita\n\n"
+            "Responde con el número de la opción que necesitas."
+        )
+        historial_con_menu = [
+            {"role": "user", "content": mensaje_cliente},
+            {"role": "assistant", "content": mensaje_menu},
+            {"role": "system", "content": "__esperando_eleccion_menu__"},
+        ]
+        return mensaje_menu, historial_con_menu, datetime.now().isoformat()
 
-    es_primer_mensaje = es_conversacion_nueva
+    # Si el historial anterior indica que estabamos esperando la eleccion
+    # del menu (1 o 2), interpretamos la respuesta del cliente ahora.
+    esperando_eleccion = (
+        historial
+        and len(historial) >= 1
+        and historial[-1].get("content") == "__esperando_eleccion_menu__"
+    )
+
+    if esperando_eleccion:
+        historial_sin_marca = historial[:-1]  # quitamos la marca antes de continuar
+
+        if not _tiene_intencion_de_agendar(mensaje_cliente):
+            print(f"Cliente {client_phone} eligio 'hablar con el equipo' o algo sin intencion de cita, el bot se queda en silencio.")
+            return None, historial_sin_marca, datetime.now().isoformat()
+
+        # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
+        historial = historial_sin_marca
+        es_primer_mensaje = True
+    else:
+        es_primer_mensaje = False
 
     fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
 
