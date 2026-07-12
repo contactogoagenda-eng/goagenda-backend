@@ -49,8 +49,11 @@ def revisar_y_enviar_recordatorios():
                 nombre_servicio = cita.get("services", {}).get("name", "tu cita") if cita.get("services") else "tu cita"
 
                 mensaje = (
-                    f"Hola {nombre_cliente}! Te recordamos tu cita en {nombre_negocio} "
-                    f"para {nombre_servicio} {_formatear_fecha_natural(fecha_cita)}. Te esperamos!"
+                    f"¡Hola, {nombre_cliente}! 👋\n\n"
+                    f"Te recordamos tu próxima cita en *{nombre_negocio}* 📅\n\n"
+                    f"✨ Servicio: *{nombre_servicio}*\n"
+                    f"🕐 Cuándo: *{_formatear_fecha_natural(fecha_cita)}*\n\n"
+                    "¡Te esperamos! 😊"
                 )
 
                 resultado_envio = send_whatsapp_message(
