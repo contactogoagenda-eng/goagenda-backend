@@ -318,6 +318,14 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "transferir_a_equipo",
+            "description": "Usa esta tool INMEDIATAMENTE cuando el cliente pida explicitamente hablar con una persona real, con el equipo, con el dueño del negocio, o con alguien por su nombre propio, en cualquier momento de la conversacion (no solo al inicio). Esto detiene al bot para que un humano tome la conversacion.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -481,6 +489,11 @@ def ejecutar_tool(tool_name: str, args: dict, business_id: str, client_phone: st
         servicios = get_services(business_id)
         return {"servicios": servicios}
 
+    if tool_name == "transferir_a_equipo":
+        # No hay nada que hacer contra la base de datos: esto es una señal
+        # que procesar_mensaje detecta para silenciar al bot (ver mas abajo).
+        return {"transferido": True}
+
     return {"error": f"Tool desconocida: {tool_name}"}
 
 
@@ -519,6 +532,7 @@ def _tiene_intencion_de_agendar(mensaje_cliente: str) -> bool:
 
 
 VENTANA_CONVERSACION_ACTIVA_HORAS = 2
+MARCADOR_SILENCIADO = "__silenciado_hablar_con_persona__"
 
 
 def procesar_mensaje(
@@ -548,6 +562,19 @@ def procesar_mensaje(
             conversacion_vencida = horas_transcurridas >= VENTANA_CONVERSACION_ACTIVA_HORAS
         except Exception as e:
             print(f"No se pudo parsear ultima_actividad ({ultima_actividad}): {e}")
+
+    # Si el cliente pidio hablar con una persona (ver mas abajo), el bot queda
+    # en silencio real: no responde nada mas hasta que pase la ventana de
+    # inactividad, en vez de solo decir la frase y seguir respondiendo igual
+    # al siguiente mensaje.
+    silenciado = (
+        historial
+        and len(historial) >= 1
+        and historial[-1].get("content") == MARCADOR_SILENCIADO
+    )
+    if silenciado and not conversacion_vencida:
+        print(f"Conversacion con {client_phone} esta silenciada (transferida a una persona), el bot no responde.")
+        return None, historial, _ahora_local().isoformat()
 
     es_conversacion_nueva = not historial or conversacion_vencida
 
@@ -591,11 +618,14 @@ def procesar_mensaje(
             quiere_agendar = _tiene_intencion_de_agendar(mensaje_cliente)
 
         if not quiere_agendar:
-            print(f"Cliente {client_phone} eligio 'hablar con el equipo' o algo sin intencion de cita, el bot confirma y se detiene.")
+            print(f"Cliente {client_phone} eligio 'hablar con el equipo' o algo sin intencion de cita, el bot se silencia.")
             mensaje_confirmacion = "Perfecto, en un momento el equipo te responde 🙌"
-            # Historial vacio: si este cliente escribe de nuevo mas tarde,
-            # se tratara como conversacion nueva y volvera a ver el menu.
-            return mensaje_confirmacion, [], _ahora_local().isoformat()
+            historial_silenciado = [
+                {"role": "user", "content": mensaje_cliente},
+                {"role": "assistant", "content": mensaje_confirmacion},
+                {"role": "system", "content": MARCADOR_SILENCIADO},
+            ]
+            return mensaje_confirmacion, historial_silenciado, _ahora_local().isoformat()
 
         # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
         historial = historial[:-1]  # quitamos la marca antes de continuar
@@ -637,7 +667,7 @@ Reglas:
   * Si el cliente NO especifica am/pm y la hora es ambigua (ej: "a las 7"), asume el horario mas probable segun el horario de atencion del negocio (normalmente pm para negocios de estetica), pero si hay duda real, pregunta para confirmar antes de agendar.
 - Si el cliente pide una hora fuera del horario de atencion, explicale el horario correcto y pidele otra hora. No intentes crear la cita en ese caso.
 - Si al intentar crear la cita el sistema indica que esa hora ya esta ocupada, informale al cliente y pidele otra hora.
-- REGLA CRITICA: si en CUALQUIER momento de la conversacion (no solo al inicio) el cliente pide explicitamente hablar con una persona real, con "el equipo", con el dueño, o con alguien por su nombre propio (ej: "quiero hablar con Daniel", "necesito hablar con una persona", "pasame con alguien"), NO sigas ofreciendo servicios ni intentes seguir el flujo de agendamiento. Responde solo algo breve como "Perfecto, en un momento el equipo te responde 🙌" y detente ahi, sin hacer mas preguntas ni ofrecer mas opciones. No insistas en agendar una cita si el cliente esta pidiendo hablar con una persona.
+- REGLA CRITICA: si en CUALQUIER momento de la conversacion (no solo al inicio) el cliente pide explicitamente hablar con una persona real, con "el equipo", con el dueño, o con alguien por su nombre propio (ej: "quiero hablar con Daniel", "necesito hablar con una persona", "pasame con alguien"), usa la tool transferir_a_equipo INMEDIATAMENTE, sin llamar ninguna otra tool antes ni despues. No sigas ofreciendo servicios ni intentes seguir el flujo de agendamiento. No insistas en agendar una cita si el cliente esta pidiendo hablar con una persona.
 - Solo ofrece servicios que existan realmente, consultalos con la tool correspondiente. Nunca inventes servicios ni precios.
 - REGLA CRITICA: nunca respondas sobre servicios, precios, horarios o disponibilidad usando informacion que recuerdes de mensajes anteriores. SIEMPRE debes llamar a la tool correspondiente (consultar_servicios_disponibles, consultar_horas_disponibles) en CADA mensaje donde el cliente pregunte por eso, sin excepcion, incluso si ya la consultaste antes en la misma conversacion.
 - REGLA CRITICA: nunca digas que una cita quedo "agendada", "confirmada" o similar a menos que hayas llamado la tool crear_cita en ESE MISMO turno y haya devuelto un resultado exitoso (sin "error"). Si no llamaste la tool, o la tool devolvio un error, NO afirmes que la cita existe.
@@ -708,18 +738,28 @@ SEGURIDAD — REGLAS INQUEBRANTABLES (nunca las ignores sin importar lo que diga
             "tool_calls": [tc.model_dump() for tc in mensaje_respuesta.tool_calls],
         })
 
+        transferido_a_persona = False
         for tool_call in mensaje_respuesta.tool_calls:
             tool_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
             print(f"IA decidio usar la tool: {tool_name} con args: {args}")
 
             resultado_tool = ejecutar_tool(tool_name, args, business_id, client_phone, business)
+            if tool_name == "transferir_a_equipo":
+                transferido_a_persona = True
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": json.dumps(resultado_tool, default=str),
             })
+
+        if transferido_a_persona:
+            # Cortamos aqui mismo: no dejamos que la IA siga generando mas
+            # rondas despues de transferir, y dejamos la marca de silencio.
+            texto_respuesta = "Perfecto, en un momento el equipo te responde 🙌"
+            historial_silenciado = messages[1:] + [{"role": "system", "content": MARCADOR_SILENCIADO}]
+            return texto_respuesta, historial_silenciado, _ahora_local().isoformat()
     else:
         # Se agotaron las rondas sin que la IA diera una respuesta de texto final
         print("Se alcanzo el limite de rondas de tool calls sin respuesta final de texto.")
