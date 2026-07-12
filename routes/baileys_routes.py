@@ -1,19 +1,11 @@
-import os
-
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 from services.ai_agent import procesar_mensaje
+from services.auth import obtener_usuario_actual, verificar_dueno, requiere_api_key_interna
+from services.baileys_client import solicitar_pairing_code, estado_conexion
 from services.db import get_business_by_id
-
-load_dotenv()
-
-# URL publica del servicio de Baileys y la API key interna que este exige
-# (header x-api-key). Deben coincidir con el .env del baileys-service.
-BAILEYS_SERVICE_URL = os.getenv("BAILEYS_SERVICE_URL", "http://localhost:3000")
-BAILEYS_INTERNAL_API_KEY = os.getenv("BAILEYS_INTERNAL_API_KEY", "")
 
 router = APIRouter()
 
@@ -29,13 +21,13 @@ class BaileysMessageInput(BaseModel):
     mensaje: str
 
 
-@router.post("/baileys/message")
+@router.post("/baileys/message", dependencies=[Depends(requiere_api_key_interna)])
 def recibir_mensaje_baileys(data: BaileysMessageInput):
     """
     Recibe mensajes desde el servicio de Baileys (WhatsApp no oficial).
     Funciona igual que el webhook de Meta, pero el business_id llega
-    directamente en el payload (Baileys sabe a cual negocio pertenece
-    porque cada instancia tiene su propio BUSINESS_ID en el .env).
+    directamente en el payload. Solo el baileys-service puede llamarlo
+    (exige el header x-api-key con la key interna compartida).
     """
     business = get_business_by_id(data.business_id)
     if not business:
@@ -71,7 +63,7 @@ class PairingCodeInput(BaseModel):
 
 
 @router.post("/baileys/pairing-code")
-def solicitar_codigo_vinculacion(data: PairingCodeInput):
+def solicitar_codigo_vinculacion(data: PairingCodeInput, user_id: str = Depends(obtener_usuario_actual)):
     """
     Pide al servicio de Baileys un codigo de vinculacion de 8 caracteres
     para que el dueño del negocio conecte su WhatsApp desde su propio
@@ -80,40 +72,28 @@ def solicitar_codigo_vinculacion(data: PairingCodeInput):
     La app Flutter llama este endpoint; la API key interna de Baileys
     nunca sale del backend.
     """
-    business = get_business_by_id(data.business_id)
-    if not business:
-        return {"error": "Negocio no encontrado"}
+    verificar_dueno(data.business_id, user_id)
 
     telefono = "".join(c for c in data.phone if c.isdigit())
     if len(telefono) < 10:
         return {"error": "Numero invalido: debe incluir el indicativo del pais, ej: 573001234567"}
 
     try:
-        respuesta = requests.post(
-            f"{BAILEYS_SERVICE_URL}/pairing-code/{data.business_id}",
-            json={"phone": telefono},
-            headers={"x-api-key": BAILEYS_INTERNAL_API_KEY},
-            timeout=30,
-        )
-        return respuesta.json()
+        return solicitar_pairing_code(data.business_id, telefono)
     except requests.exceptions.RequestException as e:
         print(f"Error pidiendo codigo de vinculacion a Baileys: {e}")
         return {"error": "No se pudo contactar el servicio de WhatsApp. Intenta de nuevo en un momento."}
 
 
 @router.get("/baileys/status")
-def estado_conexion_baileys(business_id: str):
+def estado_conexion_baileys(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
     """
     Consulta si el WhatsApp de un negocio esta conectado via Baileys.
     Pensado para que la app muestre el estado en la pantalla de vinculacion.
     """
+    verificar_dueno(business_id, user_id)
     try:
-        respuesta = requests.get(
-            f"{BAILEYS_SERVICE_URL}/status/{business_id}",
-            headers={"x-api-key": BAILEYS_INTERNAL_API_KEY},
-            timeout=15,
-        )
-        return respuesta.json()
+        return estado_conexion(business_id)
     except requests.exceptions.RequestException as e:
         print(f"Error consultando estado de Baileys: {e}")
         return {"error": "No se pudo contactar el servicio de WhatsApp."}

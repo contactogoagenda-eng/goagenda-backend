@@ -1,7 +1,9 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
+
+from services.auth import obtener_usuario_actual, verificar_dueno, requiere_api_key_interna
 
 from routes.webhook import router as webhook_router
 from routes.simulate import router as simulate_router
@@ -12,6 +14,7 @@ from services.db import supabase
 from services.reminder_service import revisar_y_enviar_recordatorios
 from routes.manual_appointments import router as manual_appointments_router
 from routes.baileys_routes import router as baileys_router
+from routes.businesses_routes import router as businesses_router
 
 
 load_dotenv()
@@ -19,12 +22,15 @@ load_dotenv()
 app = FastAPI(title="GoAgenda API")
 
 app.include_router(webhook_router)
-app.include_router(simulate_router)
+# El simulador de conversaciones es una herramienta interna de pruebas:
+# exige la key interna para que no cualquiera pueda gastar cuota de IA.
+app.include_router(simulate_router, dependencies=[Depends(requiere_api_key_interna)])
 app.include_router(services_router)
 app.include_router(business_hours_router)
 app.include_router(business_settings_router)
 app.include_router(manual_appointments_router)
 app.include_router(baileys_router)
+app.include_router(businesses_router)
 
 
 @app.get("/")
@@ -32,15 +38,16 @@ def root():
     return {"status": "GoAgenda backend corriendo correctamente"}
 
 
-@app.get("/test-db")
+@app.get("/test-db", dependencies=[Depends(requiere_api_key_interna)])
 def test_db():
     """Endpoint de prueba para confirmar que la conexion a Supabase funciona."""
     response = supabase.table("businesses").select("*").execute()
     return {"businesses": response.data}
 
 @app.get("/ai-usage")
-def consultar_gasto_ia(business_id: str):
+def consultar_gasto_ia(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
     """Consulta el gasto estimado de IA del negocio en el mes actual."""
+    verificar_dueno(business_id, user_id)
     from services.ai_usage_tracking import obtener_gasto_mensual
 
     business_response = supabase.table("businesses").select("monthly_ai_budget_usd, name").eq("id", business_id).execute()
@@ -57,7 +64,7 @@ def consultar_gasto_ia(business_id: str):
         "porcentaje_usado": round((gasto / presupuesto) * 100, 1) if presupuesto > 0 else 0,
     }
 
-@app.post("/test-push")
+@app.post("/test-push", dependencies=[Depends(requiere_api_key_interna)])
 def test_push(business_id: str):
     """Prueba el envio de notificacion push sin pasar por la IA (no gasta cuota de Gemini)."""
     from services.push_notifications import enviar_notificacion_nueva_cita
@@ -81,7 +88,7 @@ def test_push(business_id: str):
     return {"status": "Notificacion enviada (revisa tu celular)"}
 
 
-@app.post("/test-reminders")
+@app.post("/test-reminders", dependencies=[Depends(requiere_api_key_interna)])
 def test_reminders():
     """Endpoint para probar manualmente el envio de recordatorios sin esperar al scheduler."""
     enviados = revisar_y_enviar_recordatorios()

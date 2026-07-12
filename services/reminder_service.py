@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from services.db import supabase
 from services.whatsapp import send_whatsapp_message
+from services.baileys_client import send_baileys_message
 from services.ai_agent import _formatear_fecha_natural
 
 
@@ -24,8 +25,10 @@ def revisar_y_enviar_recordatorios():
         horas_antes = negocio.get("reminder_hours_before") or 24
         whatsapp_phone_number_id = negocio.get("whatsapp_phone_number_id")
 
-        if not whatsapp_phone_number_id:
-            continue  # negocio sin numero de WhatsApp configurado todavia, se omite
+        # Canal de envio: si el negocio tiene numero oficial de Meta se usa
+        # ese; si no, se intenta por Baileys (numero vinculado con codigo).
+        # Los negocios sin ninguno de los dos simplemente fallaran el envio
+        # y el recordatorio se reintentara en el siguiente ciclo.
 
         # Ventana: citas que caen entre AHORA y AHORA + horas_antes,
         # que aun no han recibido recordatorio, y siguen confirmadas.
@@ -56,11 +59,18 @@ def revisar_y_enviar_recordatorios():
                     "¡Te esperamos! 😊"
                 )
 
-                resultado_envio = send_whatsapp_message(
-                    to=cita["client_phone"],
-                    text=mensaje,
-                    business_phone_number_id=whatsapp_phone_number_id,
-                )
+                if whatsapp_phone_number_id:
+                    resultado_envio = send_whatsapp_message(
+                        to=cita["client_phone"],
+                        text=mensaje,
+                        business_phone_number_id=whatsapp_phone_number_id,
+                    )
+                else:
+                    resultado_envio = send_baileys_message(
+                        business_id=business_id,
+                        to=cita["client_phone"],
+                        text=mensaje,
+                    )
 
                 # Solo marcamos como enviado si WhatsApp confirmo el envio (sin campo "error")
                 if isinstance(resultado_envio, dict) and "error" in resultado_envio:

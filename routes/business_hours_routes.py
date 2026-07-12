@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
 from services.db import supabase
+from services.auth import obtener_usuario_actual, verificar_dueno
 
 router = APIRouter()
 
@@ -20,8 +21,9 @@ class DayHourUpdate(BaseModel):
 
 
 @router.get("/business-hours")
-def get_business_hours(business_id: str):
+def get_business_hours(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
     """Trae el horario configurado para los 7 dias de un negocio."""
+    verificar_dueno(business_id, user_id)
     response = (
         supabase.table("business_hours")
         .select("*")
@@ -35,8 +37,9 @@ def get_business_hours(business_id: str):
 
 
 @router.put("/business-hours")
-def update_business_hours(data: DayHourUpdate):
+def update_business_hours(data: DayHourUpdate, user_id: str = Depends(obtener_usuario_actual)):
     """Crea o actualiza el horario de un dia especifico para un negocio."""
+    verificar_dueno(data.business_id, user_id)
     if data.day not in DIAS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Dia invalido. Usa uno de: {DIAS_VALIDOS}")
 

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 
 from services.db import get_services, create_appointment
 from services.ai_agent import _es_hora_valida, _hay_choque_de_horario
+from services.auth import obtener_usuario_actual, verificar_dueno
 
 router = APIRouter()
 
@@ -17,7 +18,7 @@ class CrearCitaManualInput(BaseModel):
 
 
 @router.post("/appointments/manual")
-def crear_cita_manual(data: CrearCitaManualInput):
+def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener_usuario_actual)):
     """
     Crea una cita directamente desde el panel (no desde WhatsApp), para
     cuando un cliente llega en persona o llama por telefono. Reutiliza
@@ -25,6 +26,7 @@ def crear_cita_manual(data: CrearCitaManualInput):
     para que la agenda nunca quede inconsistente sin importar el canal
     por el que entro la cita.
     """
+    verificar_dueno(data.business_id, user_id)
     es_valida, mensaje_error = _es_hora_valida(data.fecha_hora, data.business_id)
     if not es_valida:
         raise HTTPException(status_code=400, detail=mensaje_error)

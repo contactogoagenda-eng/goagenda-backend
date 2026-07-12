@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
 from services.db import supabase
+from services.auth import obtener_usuario_actual, verificar_dueno
 
 router = APIRouter()
 
@@ -20,9 +21,23 @@ class ServiceUpdate(BaseModel):
     price: Optional[float] = None
 
 
+def _business_id_de_servicio(service_id: str) -> str:
+    """Busca a que negocio pertenece un servicio (para validar permisos)."""
+    response = (
+        supabase.table("services")
+        .select("business_id")
+        .eq("id", service_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    return response.data[0]["business_id"]
+
+
 @router.get("/services")
-def list_services(business_id: str):
+def list_services(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
     """Lista los servicios ACTIVOS de un negocio."""
+    verificar_dueno(business_id, user_id)
     response = (
         supabase.table("services")
         .select("*")
@@ -34,8 +49,9 @@ def list_services(business_id: str):
 
 
 @router.post("/services")
-def create_service(data: ServiceCreate):
+def create_service(data: ServiceCreate, user_id: str = Depends(obtener_usuario_actual)):
     """Crea un nuevo servicio para un negocio."""
+    verificar_dueno(data.business_id, user_id)
     response = (
         supabase.table("services")
         .insert(
@@ -53,8 +69,14 @@ def create_service(data: ServiceCreate):
 
 
 @router.put("/services/{service_id}")
-def update_service(service_id: str, data: ServiceUpdate):
+def update_service(
+    service_id: str,
+    data: ServiceUpdate,
+    user_id: str = Depends(obtener_usuario_actual),
+):
     """Edita un servicio existente (nombre, duracion y/o precio)."""
+    verificar_dueno(_business_id_de_servicio(service_id), user_id)
+
     update_fields = {k: v for k, v in data.dict().items() if v is not None}
     if not update_fields:
         raise HTTPException(status_code=400, detail="No se enviaron campos para actualizar")
@@ -71,12 +93,13 @@ def update_service(service_id: str, data: ServiceUpdate):
 
 
 @router.delete("/services/{service_id}")
-def delete_service(service_id: str):
+def delete_service(service_id: str, user_id: str = Depends(obtener_usuario_actual)):
     """
     'Elimina' un servicio mediante borrado logico (lo marca como inactivo).
     Esto evita romper citas existentes que ya usan este servicio,
     y preserva el historial/estadisticas del negocio.
     """
+    verificar_dueno(_business_id_de_servicio(service_id), user_id)
     response = (
         supabase.table("services")
         .update({"active": False})
