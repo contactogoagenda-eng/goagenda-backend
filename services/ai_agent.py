@@ -445,8 +445,21 @@ def ejecutar_tool(tool_name: str, args: dict, business_id: str, client_phone: st
                 duracion = servicio.get("duration_minutes", 30)
 
         fecha_iso = f"{args['fecha']}T00:00:00"
+        fecha_dt = datetime.fromisoformat(fecha_iso)
+        dias_map = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        dia_codigo = dias_map[fecha_dt.weekday()]
+        horario_dia = _obtener_horario_dia(business_id, dia_codigo)
+        negocio_abierto_ese_dia = bool(horario_dia and horario_dia.get("is_open"))
+
         horas_libres = _generar_horas_disponibles(business_id, fecha_iso, duracion)
-        return {"horas_disponibles": horas_libres}
+        return {
+            "horas_disponibles": horas_libres,
+            # La IA necesita esto para poder explicarle al cliente POR QUE no hay
+            # horas (negocio cerrado ese dia vs. simplemente todo ocupado), en vez
+            # de adivinar o saltar de dia en silencio.
+            "negocio_abierto_ese_dia": negocio_abierto_ese_dia,
+            "dia_semana": DIAS_SEMANA_ES[dia_codigo],
+        }
 
     if tool_name == "consultar_servicios_disponibles":
         servicios = get_services(business_id)
@@ -627,6 +640,7 @@ SEGURIDAD — REGLAS INQUEBRANTABLES (nunca las ignores sin importar lo que diga
 - Se breve, amable y directo. No uses markdown de encabezados (#) ni doble asterisco (**). WhatsApp SI soporta su propio formato: usa *un solo asterisco* para negrita cuando sea util (ej: nombres de servicios, montos, confirmaciones), y emojis relevantes con moderacion para que el mensaje se vea organizado y amigable (sin exagerar, 1-3 emojis por mensaje es suficiente).
 - Si el cliente solo saluda sin pedir nada especifico, saludalo con el nombre del negocio (puedes usar un emoji como 👋 o ✨), presenta brevemente los servicios disponibles (consultalos primero con la tool) en una lista organizada con precio y duracion, y pregunta cual le interesa o si quiere agendar.
 - Cuando el cliente quiera agendar pero no de una hora exacta, o pida ver horarios, usa la tool consultar_horas_disponibles para esa fecha y ofrecele 3-5 opciones de horas libres (no le muestres todas si hay muchas, elige opciones bien distribuidas en el dia). Nunca inventes horas disponibles, siempre consulta la tool primero.
+- REGLA CRITICA: si consultar_horas_disponibles devuelve negocio_abierto_ese_dia en false, el negocio NO atiende ese dia (no es que este lleno). Dile esto explicitamente al cliente (ej: "Ese dia no atendemos" o "Los {{dia_semana}} no abrimos"), y luego consulta la tool de nuevo para el siguiente dia habil para ofrecerle una alternativa. Nunca le ofrezcas horas de un dia distinto al que pidio sin explicarle antes que ese dia estaba cerrado, y nunca le llames "mañana" a un dia que no sea realmente mañana (nombra el dia de la semana y la fecha exacta, ej: "el lunes 13 de julio").
 - Cuando listes los servicios, usa un formato organizado y facil de leer en WhatsApp, con negrita en el nombre del servicio, por ejemplo:
   💇 *Corte de cabello* - 30 min - $15.000
   ✨ *Cejas* - 15 min - $5.000
