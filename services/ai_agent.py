@@ -13,6 +13,7 @@ from services.db import (
     get_client_appointments,
     get_business_by_id,
     get_confirmed_appointments_for_day,
+    esta_chat_excluido,
     supabase as client_supabase,
 )
 from services.push_notifications import (
@@ -550,6 +551,12 @@ def procesar_mensaje(
     un cliente que agenda hoy y escribe algo no relacionado (ej: un favor
     personal al dueño) al dia siguiente.
     """
+    if esta_chat_excluido(business_id, client_phone):
+        # Numero excluido a mano por el dueño (familiares, proveedores,
+        # etc.): el bot no responde nada y no se gasta cuota de OpenAI.
+        print(f"Chat con {client_phone} esta excluido del bot para el negocio {business_id}, se ignora.")
+        return None, historial or [], ultima_actividad
+
     business = get_business_by_id(business_id)
     nombre_negocio = business.get("name", "el negocio")
     tipo_negocio = business.get("business_type") or "centro de estetica"

@@ -144,6 +144,55 @@ def cancel_appointment(appointment_id: str, client_phone: str):
 
     return response.data
 
+def esta_chat_excluido(business_id: str, client_phone: str) -> bool:
+    """
+    Revisa si un numero de cliente esta en la lista de exclusion de un
+    negocio (ej. familiares, proveedores u otros contactos que le escriben
+    al mismo WhatsApp del negocio y no deben recibir respuestas del bot).
+    """
+    response = (
+        supabase.table("excluded_chats")
+        .select("id")
+        .eq("business_id", business_id)
+        .eq("phone_number", client_phone)
+        .limit(1)
+        .execute()
+    )
+    return bool(response.data)
+
+
+def listar_chats_excluidos(business_id: str):
+    """Lista los numeros excluidos del bot para un negocio."""
+    response = (
+        supabase.table("excluded_chats")
+        .select("*")
+        .eq("business_id", business_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return response.data
+
+
+def agregar_chat_excluido(business_id: str, phone_number: str):
+    """Agrega (o reafirma) un numero a la lista de exclusion de un negocio."""
+    response = (
+        supabase.table("excluded_chats")
+        .upsert(
+            {"business_id": business_id, "phone_number": phone_number},
+            on_conflict="business_id,phone_number",
+        )
+        .execute()
+    )
+    return response.data[0] if response.data else None
+
+
+def eliminar_chat_excluido(business_id: str, phone_number: str):
+    """Quita un numero de la lista de exclusion (el bot vuelve a responderle)."""
+    supabase.table("excluded_chats").delete().eq("business_id", business_id).eq(
+        "phone_number", phone_number
+    ).execute()
+
+
 def get_client_appointments(business_id: str, client_phone: str):
     """Obtiene las citas activas de un cliente en un negocio."""
     response = (

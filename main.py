@@ -15,6 +15,7 @@ from services.reminder_service import revisar_y_enviar_recordatorios
 from routes.manual_appointments import router as manual_appointments_router
 from routes.baileys_routes import router as baileys_router
 from routes.businesses_routes import router as businesses_router
+from routes.excluded_chats_routes import router as excluded_chats_router
 
 
 load_dotenv()
@@ -31,6 +32,7 @@ app.include_router(business_settings_router)
 app.include_router(manual_appointments_router)
 app.include_router(baileys_router)
 app.include_router(businesses_router)
+app.include_router(excluded_chats_router)
 
 
 @app.get("/")
