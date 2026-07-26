@@ -593,10 +593,10 @@ def procesar_mensaje(
                 nombre_servicio = apt["services"]["name"]
 
             try:
-                # Formatear la fecha para la notificación push
-                dt = datetime.fromisoformat(apt["scheduled_at"].replace("Z", "+00:00"))
-                # Convertir a hora de Colombia para la notificación
-                dt_local = dt.astimezone(TZ_NEGOCIO).replace(tzinfo=None)
+                # El string en base de datos ya representa la hora local de Colombia.
+                # Eliminamos sufijos Z o desfases de zona para parsearlo directamente como naive.
+                clean_str = apt["scheduled_at"].split("+")[0].split("Z")[0]
+                dt_local = datetime.fromisoformat(clean_str)
                 fecha_hora_texto = _formatear_fecha_natural(dt_local)
             except Exception as e:
                 print(f"Error parseando fecha para notificacion push: {e}")
