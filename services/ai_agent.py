@@ -558,6 +558,14 @@ def procesar_mensaje(
         return None, historial or [], ultima_actividad
 
     business = get_business_by_id(business_id)
+    if not business:
+        return None, historial or [], ultima_actividad
+
+    plan = business.get("plan", "basic")
+    if plan == "none":
+        print(f"Negocio {business_id} esta en Plan Agenda (none), el bot se desactiva por completo.")
+        return None, historial or [], ultima_actividad
+
     nombre_negocio = business.get("name", "el negocio")
     tipo_negocio = business.get("business_type") or "centro de estetica"
 
@@ -638,7 +646,7 @@ def procesar_mensaje(
             return mensaje_confirmacion, historial_silenciado, _ahora_local().isoformat()
 
         # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
-        if plan in ("basic", "none"):
+        if plan == "basic":
             booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
             link = f"{booking_base_url}/?business_id={business_id}"
             mensaje_link = (
@@ -656,7 +664,7 @@ def procesar_mensaje(
         es_primer_mensaje = True
     else:
         es_primer_mensaje = False
-        if plan in ("basic", "none") and _tiene_intencion_de_agendar(mensaje_cliente):
+        if plan == "basic" and _tiene_intencion_de_agendar(mensaje_cliente):
             booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
             link = f"{booking_base_url}/?business_id={business_id}"
             mensaje_link = (
