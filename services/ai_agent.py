@@ -568,7 +568,53 @@ def procesar_mensaje(
 
     # Interceptar mensaje de confirmacion automatica de la web
     if "acabo de agendar una cita" in mensaje_cliente.lower() and "a través de la web" in mensaje_cliente.lower():
-        mensaje_confirmacion = "¡Excelente! 🎉 Tu cita ya quedó registrada en el sistema. ¡Te esperamos! 😊"
+        # 1. Buscar la última cita en estado 'pending' (pendiente) de este cliente y negocio
+        res_apt = (
+            client_supabase.table("appointments")
+            .select("*, services(name)")
+            .eq("business_id", business_id)
+            .eq("client_phone", client_phone)
+            .eq("status", "pending")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        nombre_servicio = "servicio"
+        fecha_hora_texto = "la fecha acordada"
+
+        if res_apt.data:
+            apt = res_apt.data[0]
+            # 2. Actualizar el estado de la cita a 'confirmed' (Confirmada)
+            client_supabase.table("appointments").update({"status": "confirmed"}).eq("id", apt["id"]).execute()
+
+            # Extraer info para la notificación push
+            if apt.get("services") and apt["services"].get("name"):
+                nombre_servicio = apt["services"]["name"]
+
+            try:
+                # Formatear la fecha para la notificación push
+                dt = datetime.fromisoformat(apt["scheduled_at"].replace("Z", "+00:00"))
+                # Convertir a hora de Colombia para la notificación
+                dt_local = dt.astimezone(TZ_NEGOCIO).replace(tzinfo=None)
+                fecha_hora_texto = _formatear_fecha_natural(dt_local)
+            except Exception as e:
+                print(f"Error parseando fecha para notificacion push: {e}")
+
+            # 3. Enviar la notificación push al dueño del negocio en tiempo real
+            fcm_token = business.get("fcm_token")
+            if fcm_token:
+                try:
+                    enviar_notificacion_nueva_cita(
+                        fcm_token=fcm_token,
+                        nombre_cliente=apt.get("client_name", "Cliente"),
+                        servicio=nombre_servicio,
+                        fecha_hora_texto=fecha_hora_texto,
+                    )
+                except Exception as e:
+                    print(f"Error enviando notificacion push: {e}")
+
+        mensaje_confirmacion = "¡Excelente! 🎉 Tu cita ha sido confirmada con éxito. ¡Te esperamos! 😊"
         historial_final = (historial or []) + [
             {"role": "user", "content": mensaje_cliente},
             {"role": "assistant", "content": mensaje_confirmacion}
