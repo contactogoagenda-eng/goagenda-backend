@@ -152,7 +152,7 @@ def esta_chat_excluido(business_id: str, client_phone: str) -> bool:
     """
     response = (
         supabase.table("excluded_chats")
-        .select("id")
+        .select("phone_number")
         .eq("business_id", business_id)
         .eq("phone_number", client_phone)
         .limit(1)
