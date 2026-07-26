@@ -566,6 +566,15 @@ def procesar_mensaje(
         print(f"Negocio {business_id} esta en Plan Agenda (none), el bot se desactiva por completo.")
         return None, historial or [], ultima_actividad
 
+    # Interceptar mensaje de confirmacion automatica de la web
+    if "acabo de agendar una cita" in mensaje_cliente.lower() and "a través de la web" in mensaje_cliente.lower():
+        mensaje_confirmacion = "¡Excelente! 🎉 Tu cita ya quedó registrada en el sistema. ¡Te esperamos! 😊"
+        historial_final = (historial or []) + [
+            {"role": "user", "content": mensaje_cliente},
+            {"role": "assistant", "content": mensaje_confirmacion}
+        ]
+        return mensaje_confirmacion, historial_final, _ahora_local().isoformat()
+
     nombre_negocio = business.get("name", "el negocio")
     tipo_negocio = business.get("business_type") or "centro de estetica"
 
