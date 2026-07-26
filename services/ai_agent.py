@@ -638,7 +638,7 @@ def procesar_mensaje(
             return mensaje_confirmacion, historial_silenciado, _ahora_local().isoformat()
 
         # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
-        if plan == "basic":
+        if plan in ("basic", "none"):
             booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
             link = f"{booking_base_url}/?business_id={business_id}"
             mensaje_link = (
@@ -656,7 +656,7 @@ def procesar_mensaje(
         es_primer_mensaje = True
     else:
         es_primer_mensaje = False
-        if plan == "basic" and _tiene_intencion_de_agendar(mensaje_cliente):
+        if plan in ("basic", "none") and _tiene_intencion_de_agendar(mensaje_cliente):
             booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
             link = f"{booking_base_url}/?business_id={business_id}"
             mensaje_link = (
