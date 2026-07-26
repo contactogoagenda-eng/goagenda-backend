@@ -603,8 +603,7 @@ def procesar_mensaje(
         ]
         return mensaje_menu, historial_con_menu, _ahora_local().isoformat()
 
-    # Si el historial anterior indica que estabamos esperando la eleccion
-    # del menu (1 o 2), interpretamos la respuesta del cliente ahora.
+    plan = business.get("plan", "basic")
     esperando_eleccion = (
         historial
         and len(historial) >= 1
@@ -639,10 +638,37 @@ def procesar_mensaje(
             return mensaje_confirmacion, historial_silenciado, _ahora_local().isoformat()
 
         # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
+        if plan == "basic":
+            booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
+            link = f"{booking_base_url}/?business_id={business_id}"
+            mensaje_link = (
+                f"¡Excelente! 📅 Para agendar tu cita, ingresa a nuestra web de agendamiento:\n\n"
+                f"{link}\n\n"
+                f"Allí podrás ver nuestros servicios, horarios y confirmar tu reserva en menos de un minuto. ¡Te esperamos! 😊"
+            )
+            historial_final = historial[:-1] + [
+                {"role": "user", "content": mensaje_cliente},
+                {"role": "assistant", "content": mensaje_link}
+            ]
+            return mensaje_link, historial_final, _ahora_local().isoformat()
+
         historial = historial[:-1]  # quitamos la marca antes de continuar
         es_primer_mensaje = True
     else:
         es_primer_mensaje = False
+        if plan == "basic" and _tiene_intencion_de_agendar(mensaje_cliente):
+            booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
+            link = f"{booking_base_url}/?business_id={business_id}"
+            mensaje_link = (
+                f"¡Excelente! 📅 Para agendar tu cita, ingresa a nuestra web de agendamiento:\n\n"
+                f"{link}\n\n"
+                f"Allí podrás ver nuestros servicios, horarios y confirmar tu reserva en menos de un minuto. ¡Te esperamos! 😊"
+            )
+            historial_final = historial + [
+                {"role": "user", "content": mensaje_cliente},
+                {"role": "assistant", "content": mensaje_link}
+            ]
+            return mensaje_link, historial_final, _ahora_local().isoformat()
 
     fecha_actual = _ahora_local().strftime("%Y-%m-%d %H:%M (%A)")
 
