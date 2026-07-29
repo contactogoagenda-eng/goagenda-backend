@@ -702,7 +702,7 @@ def procesar_mensaje(
 
         # El cliente eligio reservar (opcion 2, o escribio algo con intencion directa)
         if plan == "basic":
-            booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
+            booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-pi.vercel.app")
             link = f"{booking_base_url}/?business_id={business_id}"
             mensaje_link = (
                 f"¡Excelente! 📅 Para agendar tu cita, ingresa a nuestra web de agendamiento:\n\n"
@@ -720,7 +720,7 @@ def procesar_mensaje(
     else:
         es_primer_mensaje = False
         if plan == "basic" and _tiene_intencion_de_agendar(mensaje_cliente):
-            booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-3467p8uvu-go-agenda.vercel.app")
+            booking_base_url = os.getenv("BOOKING_WEB_URL", "https://goagenda-pi.vercel.app")
             link = f"{booking_base_url}/?business_id={business_id}"
             mensaje_link = (
                 f"¡Excelente! 📅 Para agendar tu cita, ingresa a nuestra web de agendamiento:\n\n"
