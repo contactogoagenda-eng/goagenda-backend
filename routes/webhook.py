@@ -98,3 +98,51 @@ async def receive_message(request: Request):
         print("No es un mensaje de texto entrante o el payload no tiene el formato esperado:", e)
 
     return {"status": "ok"}
+from pydantic import BaseModel
+from services.db import supabase as client_supabase
+
+class NotifyWebBookingInput(BaseModel):
+    appointment_id: str
+    business_id: str
+
+@router.post("/notify-web-booking")
+def notify_web_booking(data: NotifyWebBookingInput):
+    from services.push_notifications import enviar_notificacion_nueva_cita
+    
+    # 1. Obtener la cita
+    res_apt = client_supabase.table("appointments").select("*, services(name), businesses(fcm_token)").eq("id", data.appointment_id).execute()
+    if not res_apt.data:
+        return {"error": "Cita no encontrada"}
+        
+    apt = res_apt.data[0]
+    
+    # 2. Actualizar a confirmed si esta en pending
+    if apt.get("status") == "pending":
+        client_supabase.table("appointments").update({"status": "confirmed"}).eq("id", data.appointment_id).execute()
+        
+    # 3. Enviar notificacion push
+    fcm_token = apt.get("businesses", {}).get("fcm_token")
+    if fcm_token:
+        nombre_cliente = apt.get("client_name", "Cliente")
+        nombre_servicio = apt.get("services", {}).get("name", "Servicio")
+        
+        # Formatear fecha y hora
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(apt.get("scheduled_at", ""))
+            fecha_str = dt.strftime("%Y-%m-%d %H:%M")
+        except:
+            fecha_str = apt.get("scheduled_at", "una fecha")
+            
+        try:
+            enviar_notificacion_nueva_cita(
+                fcm_token=fcm_token,
+                nombre_cliente=nombre_cliente,
+                servicio=nombre_servicio,
+                fecha_hora_texto=fecha_str
+            )
+        except Exception as e:
+            print("Error enviando push notification desde web:", e)
+        
+    return {"status": "ok", "message": "Notificacion enviada y cita confirmada"}
+

@@ -20,7 +20,17 @@ from routes.excluded_chats_routes import router as excluded_chats_router
 
 load_dotenv()
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="GoAgenda API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(webhook_router)
 # El simulador de conversaciones es una herramienta interna de pruebas:
