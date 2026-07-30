@@ -73,6 +73,16 @@ async def receive_message(request: Request):
 
         print(f"[{business['name']}] Mensaje de {from_number}: {text}")
 
+        # Interceptar el mensaje de confirmación desde la web
+        if "Acabo de agendar una cita" in text and "a través de la web" in text:
+            try:
+                from services.db import supabase as client_supabase
+                # Actualizamos a 'confirmed' cualquier cita pendiente de este cliente
+                client_supabase.table("appointments").update({"status": "confirmed"}).eq("business_id", business_id).eq("client_phone", from_number).eq("status", "pending").execute()
+                print(f"Cita web confirmada automaticamente via WhatsApp para {from_number}")
+            except Exception as e:
+                print("Error confirmando cita web automaticamente:", e)
+
         key = f"{business_id}:{from_number}"
         estado_previo = historiales_whatsapp.get(key, {})
         historial_previo = estado_previo.get("historial", [])
@@ -116,9 +126,8 @@ def notify_web_booking(data: NotifyWebBookingInput):
         
     apt = res_apt.data[0]
     
-    # 2. Actualizar a confirmed si esta en pending
-    if apt.get("status") == "pending":
-        client_supabase.table("appointments").update({"status": "confirmed"}).eq("id", data.appointment_id).execute()
+    # Se elimina la actualizacion a 'confirmed' para que la cita
+    # se mantenga en 'pending' hasta que el cliente escriba por WhatsApp.
         
     # 3. Enviar notificacion push
     fcm_token = apt.get("businesses", {}).get("fcm_token")
