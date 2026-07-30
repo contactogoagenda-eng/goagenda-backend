@@ -155,3 +155,54 @@ def notify_web_booking(data: NotifyWebBookingInput):
         
     return {"status": "ok", "message": "Notificacion enviada y cita confirmada"}
 
+from typing import Any, Dict
+
+class SupabaseWebhookPayload(BaseModel):
+    type: str
+    table: str
+    record: Dict[str, Any]
+    schema_name: str | None = None
+    old_record: Any = None
+
+@router.post("/supabase-webhook")
+def supabase_webhook(payload: SupabaseWebhookPayload):
+    from services.push_notifications import enviar_notificacion_nueva_cita
+    
+    if payload.type != "INSERT" or payload.table != "appointments":
+        return {"status": "ignorado", "motivo": "No es un INSERT en appointments"}
+        
+    record = payload.record
+    
+    # Si la cita NO está en pending, la creó el bot de IA o se creó manual.
+    # Esas vías ya envían notificación, así que solo notificamos las web (pending).
+    if record.get("status") != "pending":
+        return {"status": "ignorado", "motivo": "Cita no es pending"}
+
+    res_apt = client_supabase.table("appointments").select("*, services(name), businesses(fcm_token)").eq("id", record["id"]).execute()
+    if not res_apt.data:
+        return {"error": "Cita no encontrada en BD"}
+        
+    apt = res_apt.data[0]
+    fcm_token = apt.get("businesses", {}).get("fcm_token")
+    if fcm_token:
+        nombre_cliente = apt.get("client_name", "Cliente")
+        nombre_servicio = apt.get("services", {}).get("name", "Servicio")
+        
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(apt.get("scheduled_at", ""))
+            fecha_str = dt.strftime("%Y-%m-%d %H:%M")
+        except:
+            fecha_str = apt.get("scheduled_at", "una fecha")
+            
+        try:
+            enviar_notificacion_nueva_cita(
+                fcm_token=fcm_token,
+                nombre_cliente=nombre_cliente,
+                servicio=nombre_servicio,
+                fecha_hora_texto=fecha_str
+            )
+        except Exception as e:
+            print("Error enviando push notification desde supabase webhook:", e)
+        
+    return {"status": "ok", "message": "Notificacion enviada desde supabase webhook"}
