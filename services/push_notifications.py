@@ -48,7 +48,7 @@ def _enviar_push(fcm_token: str, titulo: str, cuerpo: str):
             android=messaging.AndroidConfig(
                 priority="high",
                 notification=messaging.AndroidNotification(
-                    channel_id="citas_nuevas_v4",
+                    channel_id="citas_nuevas_v5",
                     priority="high",
                     default_sound=True,
                     icon="ic_stat_name",
