@@ -1,5 +1,7 @@
 # Variables de entorno y credenciales (NUNCA subir esto a git)
 .env
+.env.*
+!.env.example
 firebase-credentials.json
 
 # Entorno virtual de Python
