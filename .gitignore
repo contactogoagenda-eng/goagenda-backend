@@ -10,6 +10,11 @@ __pycache__/
 # Archivos del sistema
 .DS_Store
 
+# Node (no deberia haber dependencias de Node en este proyecto)
+node_modules/
+package.json
+package-lock.json
+
 # Editor
 .vscode/
 .idea/
