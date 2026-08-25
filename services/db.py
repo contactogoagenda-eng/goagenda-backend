@@ -6,8 +6,16 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_SERVER_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY
+
+if not SUPABASE_URL or not SUPABASE_SERVER_KEY:
+    raise RuntimeError(
+        "Faltan variables de Supabase: define SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY (o SUPABASE_KEY)."
+    )
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVER_KEY)
 
 
 def get_business_by_phone(phone_number: str):
@@ -24,38 +32,6 @@ def get_business_by_id(business_id: str):
     if response.data:
         return response.data[0]
     return None
-
-
-def get_conversation_state(business_id: str, client_phone: str):
-    """Obtiene el estado de conversación actual de un cliente con un negocio."""
-    response = (
-        supabase.table("conversation_state")
-        .select("*")
-        .eq("business_id", business_id)
-        .eq("client_phone", client_phone)
-        .execute()
-    )
-    if response.data:
-        return response.data[0]
-    return None
-
-
-def upsert_conversation_state(business_id: str, client_phone: str, step: str, context: dict):
-    """Crea o actualiza el estado de conversación de un cliente."""
-    response = (
-        supabase.table("conversation_state")
-        .upsert(
-            {
-                "business_id": business_id,
-                "client_phone": client_phone,
-                "step": step,
-                "context": context,
-            },
-            on_conflict="business_id,client_phone",
-        )
-        .execute()
-    )
-    return response.data
 
 
 def get_confirmed_appointments_for_day(business_id: str, fecha: str):
@@ -201,6 +177,35 @@ def get_client_appointments(business_id: str, client_phone: str):
         .eq("business_id", business_id)
         .eq("client_phone", client_phone)
         .eq("status", "confirmed")
+        .execute()
+    )
+    return response.data
+
+
+def get_appointment_by_id_and_phone(appointment_id: str, client_phone: str):
+    """
+    Trae una cita (con el nombre y duracion del servicio) validando que
+    pertenezca al telefono dado, para cancelaciones y reprogramaciones.
+    Retorna None si no existe o no es de ese cliente.
+    """
+    response = (
+        supabase.table("appointments")
+        .select("*, services(name, duration_minutes)")
+        .eq("id", appointment_id)
+        .eq("client_phone", client_phone)
+        .execute()
+    )
+    if response.data:
+        return response.data[0]
+    return None
+
+
+def update_appointment_schedule(appointment_id: str, nueva_fecha_hora: str):
+    """Actualiza la fecha/hora de una cita existente (reprogramacion)."""
+    response = (
+        supabase.table("appointments")
+        .update({"scheduled_at": nueva_fecha_hora})
+        .eq("id", appointment_id)
         .execute()
     )
     return response.data

@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from datetime import datetime
 
 from services.db import get_services, create_appointment
-from services.ai_agent import _es_hora_valida, _hay_choque_de_horario
+from services.scheduling import es_hora_valida, hay_choque_de_horario
 from services.auth import obtener_usuario_actual, verificar_dueno
 
 router = APIRouter()
@@ -27,7 +27,7 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
     por el que entro la cita.
     """
     verificar_dueno(data.business_id, user_id)
-    es_valida, mensaje_error = _es_hora_valida(data.fecha_hora, data.business_id)
+    es_valida, mensaje_error = es_hora_valida(data.fecha_hora, data.business_id)
     if not es_valida:
         raise HTTPException(status_code=400, detail=mensaje_error)
 
@@ -39,7 +39,7 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
     fecha_hora_dt = datetime.fromisoformat(data.fecha_hora)
     duracion = servicio.get("duration_minutes", 30)
 
-    hay_choque, mensaje_choque = _hay_choque_de_horario(data.business_id, fecha_hora_dt, duracion)
+    hay_choque, mensaje_choque = hay_choque_de_horario(data.business_id, fecha_hora_dt, duracion)
     if hay_choque:
         raise HTTPException(status_code=409, detail=mensaje_choque)
 

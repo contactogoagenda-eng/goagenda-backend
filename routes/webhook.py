@@ -2,8 +2,6 @@ import os
 from fastapi import APIRouter, Request, Query
 from dotenv import load_dotenv
 
-from services.whatsapp import send_whatsapp_message
-from services.ai_agent import procesar_mensaje
 from services.db import get_business_by_whatsapp_phone_id
 
 load_dotenv()
@@ -11,12 +9,6 @@ load_dotenv()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 
 router = APIRouter()
-
-# Historial en memoria, separado por negocio + numero de cliente.
-# Cada entrada guarda: {"historial": [...], "ultima_actividad": "iso_timestamp"}
-# (se pierde si el backend se reinicia; para produccion real con varios
-# negocios activos, considerar persistirlo en Supabase mas adelante)
-historiales_whatsapp = {}
 
 
 @router.get("/webhook")
@@ -37,8 +29,13 @@ async def receive_message(request: Request):
     Recibe los mensajes entrantes de WhatsApp de CUALQUIER negocio conectado.
     Identifica el negocio dinamicamente segun el phone_number_id que llega
     en cada mensaje (metadata.phone_number_id), en vez de asumir un solo
-    negocio fijo. Esto permite tener varios negocios, cada uno con su propio
-    numero de WhatsApp, todos apuntando al mismo backend y webhook.
+    negocio fijo.
+
+    El bot de IA conversacional ya NO responde por WhatsApp (se movio al
+    chat web publico, ver routes/chat_routes.py). Este endpoint sigue
+    activo solo para: verificar el webhook ante Meta, y para el puente que
+    confirma automaticamente una cita agendada en la web cuando el cliente
+    escribe la frase de confirmacion por WhatsApp.
     """
     body = await request.json()
     print("Webhook recibido:", body)
@@ -82,27 +79,6 @@ async def receive_message(request: Request):
                 print(f"Cita web confirmada automaticamente via WhatsApp para {from_number}")
             except Exception as e:
                 print("Error confirmando cita web automaticamente:", e)
-
-        key = f"{business_id}:{from_number}"
-        estado_previo = historiales_whatsapp.get(key, {})
-        historial_previo = estado_previo.get("historial", [])
-        ultima_actividad_previa = estado_previo.get("ultima_actividad")
-
-        respuesta, nuevo_historial, nueva_ultima_actividad = procesar_mensaje(
-            mensaje_cliente=text,
-            business_id=business_id,
-            client_phone=from_number,
-            historial=historial_previo,
-            ultima_actividad=ultima_actividad_previa,
-        )
-
-        historiales_whatsapp[key] = {
-            "historial": nuevo_historial,
-            "ultima_actividad": nueva_ultima_actividad,
-        }
-
-        if respuesta is not None:
-            send_whatsapp_message(to=from_number, text=respuesta, business_phone_number_id=phone_number_id)
 
     except (KeyError, IndexError) as e:
         print("No es un mensaje de texto entrante o el payload no tiene el formato esperado:", e)

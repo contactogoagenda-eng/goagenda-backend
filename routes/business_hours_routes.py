@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+from postgrest.exceptions import APIError
 
 from services.db import supabase
 from services.auth import obtener_usuario_actual, verificar_dueno
@@ -55,9 +56,19 @@ def update_business_hours(data: DayHourUpdate, user_id: str = Depends(obtener_us
     update_data["lunch_start"] = data.lunch_start
     update_data["lunch_end"] = data.lunch_end
 
-    response = (
-        supabase.table("business_hours")
-        .upsert(update_data, on_conflict="business_id,day")
-        .execute()
-    )
+    try:
+        response = (
+            supabase.table("business_hours")
+            .upsert(update_data, on_conflict="business_id,day")
+            .execute()
+        )
+    except APIError as e:
+        # Si falta policy/RLS en Supabase, devolvemos error controlado para evitar 500 opaco.
+        if getattr(e, "code", None) == "42501":
+            raise HTTPException(
+                status_code=403,
+                detail="Sin permisos para actualizar business_hours (RLS). Configura SUPABASE_SERVICE_ROLE_KEY en el backend o ajusta la policy de Supabase.",
+            )
+        raise
+
     return {"business_hour": response.data[0] if response.data else None}

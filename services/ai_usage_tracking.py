@@ -14,24 +14,19 @@ def calcular_costo(prompt_tokens: int, completion_tokens: int) -> float:
     return round(costo_input + costo_output, 6)
 
 
-def registrar_uso(business_id: str, usage) -> float:
+def registrar_uso(business_id: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> float:
     """
-    Guarda en ai_usage_log el consumo de una llamada a OpenAI.
-    'usage' es el objeto .usage que devuelve la respuesta de OpenAI
-    (tiene prompt_tokens, completion_tokens, total_tokens).
+    Guarda en ai_usage_log el consumo de una llamada al modelo de IA.
     Retorna el costo estimado de esta llamada especifica.
     """
-    if usage is None:
-        return 0.0
-
-    costo = calcular_costo(usage.prompt_tokens, usage.completion_tokens)
+    costo = calcular_costo(prompt_tokens, completion_tokens)
 
     try:
         supabase.table("ai_usage_log").insert({
             "business_id": business_id,
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "total_tokens": usage.total_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
             "estimated_cost_usd": costo,
         }).execute()
     except Exception as e:

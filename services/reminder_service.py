@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from services.db import supabase
 from services.whatsapp import send_whatsapp_message
 from services.baileys_client import send_baileys_message
-from services.ai_agent import _formatear_fecha_natural
+from services.scheduling import formatear_fecha_natural
 
 
 def revisar_y_enviar_recordatorios():
@@ -55,7 +55,7 @@ def revisar_y_enviar_recordatorios():
                     f"¡Hola, {nombre_cliente}! 👋\n\n"
                     f"Te recordamos tu próxima cita en *{nombre_negocio}* 📅\n\n"
                     f"✨ Servicio: *{nombre_servicio}*\n"
-                    f"🕐 Cuándo: *{_formatear_fecha_natural(fecha_cita)}*\n\n"
+                    f"🕐 Cuándo: *{formatear_fecha_natural(fecha_cita)}*\n\n"
                     "¡Te esperamos! 😊"
                 )
 

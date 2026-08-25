@@ -2,11 +2,12 @@ from fastapi import Depends, FastAPI
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
+import os
 
 from services.auth import obtener_usuario_actual, verificar_dueno, requiere_api_key_interna
 
 from routes.webhook import router as webhook_router
-from routes.simulate import router as simulate_router
+from routes.chat_routes import router as chat_router
 from routes.services_routes import router as services_router
 from routes.business_hours_routes import router as business_hours_router
 from routes.business_settings_routes import router as business_settings_router
@@ -24,18 +25,34 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="GoAgenda API")
 
+
+def _obtener_origenes_cors() -> list[str]:
+    """Lee CORS_ALLOWED_ORIGINS (coma-separado) y aplica defaults de desarrollo."""
+    valor_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if valor_env:
+        return [o.strip() for o in valor_env.split(",") if o.strip()]
+
+    return [
+        "http://localhost:4200",
+        "http://127.0.0.1:4200",
+    ]
+
+
+ORIGENES_CORS = _obtener_origenes_cors()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ORIGENES_CORS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(webhook_router)
-# El simulador de conversaciones es una herramienta interna de pruebas:
-# exige la key interna para que no cualquiera pueda gastar cuota de IA.
-app.include_router(simulate_router, dependencies=[Depends(requiere_api_key_interna)])
+# Chat publico del agente de IA: sin auth, aislado por business_id en la URL
+# (ver routes/chat_routes.py). El enlace que el negocio comparte con sus
+# clientes es la unica "credencial".
+app.include_router(chat_router)
 app.include_router(services_router)
 app.include_router(business_hours_router)
 app.include_router(business_settings_router)
