@@ -19,6 +19,7 @@ from services.db import (
 )
 from services.scheduling import (
     DIAS_SEMANA_ES,
+    DIAS_MAP,
     es_hora_valida,
     hay_choque_de_horario,
     generar_horas_disponibles,
@@ -66,14 +67,38 @@ def registrar_telefono_cliente(
 
 
 @tool
-def consultar_empleados_disponibles(business_id: BusinessId) -> dict:
+def consultar_empleados_disponibles(
+    business_id: BusinessId,
+    fecha: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Fecha en formato YYYY-MM-DD. Si ya sabes para que dia quiere la cita el cliente, "
+                "pasala aqui: filtra la lista a solo los empleados que SI trabajan ese dia de la "
+                "semana (segun su propio horario). Si todavia no sabes la fecha, omite este "
+                "parametro y se listan todos los empleados activos."
+            )
+        ),
+    ] = None,
+) -> dict:
     """
-    Lista los empleados activos del negocio con los servicios que cada uno
-    ofrece. Usa esta tool cuando necesites saber con quien puede ser la
-    cita (para preguntarle al cliente, si hay mas de uno) antes de
-    mostrar servicios, horas disponibles, o agendar.
+    Lista los empleados activos del negocio (opcionalmente filtrados a los
+    que trabajan un dia especifico) con los servicios que cada uno ofrece.
+    REGLA CRITICA: siempre debes usar esta tool y preguntarle al cliente con
+    quien prefiere la cita ANTES de mostrar servicios, horas disponibles, o
+    agendar, salvo que el empleado ya venga fijo (enlace de chat propio de
+    un empleado) o el negocio solo tenga un empleado activo.
     """
     empleados = get_employees(business_id)
+
+    if fecha:
+        try:
+            fecha_dt = datetime.fromisoformat(fecha)
+            dia_codigo = DIAS_MAP[fecha_dt.weekday()]
+            empleados = [e for e in empleados if (obtener_horario_dia(e["id"], dia_codigo) or {}).get("is_open")]
+        except ValueError:
+            pass  # fecha con formato invalido: mejor listar todos que fallar la tool
+
     return {
         "empleados": [
             {

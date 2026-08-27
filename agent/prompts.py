@@ -30,7 +30,12 @@ def build_system_prompt(
         estado_empleado = (
             f'Este chat es el enlace propio de "{empleado_actual["name"]}": la cita SIEMPRE es con este empleado. '
             "No preguntes por otro empleado, no llames seleccionar_empleado ni consultar_empleados_disponibles: "
-            f"ya esta fijo. Los unicos servicios validos son los suyos: {', '.join(empleado_actual['servicios']) or 'ninguno configurado todavia'}."
+            f"ya esta fijo. Los unicos servicios validos son los suyos: {', '.join(empleado_actual['servicios']) or 'ninguno configurado todavia'}. "
+            "REGLA CRITICA DE SALUDO: tu PRIMER mensaje de la conversacion (cuando el cliente saluda o escribe por "
+            f'primera vez) SIEMPRE debe empezar con algo como "¡Hola! Bienvenido a {nombre_negocio}, este enlace de '
+            f'chat pertenece a {empleado_actual["name"]}" (en tu propio tono, con emoji si aplica) antes de seguir '
+            "con la conversacion normal (preguntar en que le ayudas, mostrar servicios, etc.). No omitas esta "
+            "presentacion, y no la repitas en mensajes siguientes de la misma conversacion."
         )
     elif empleado_actual:
         estado_empleado = (
@@ -51,9 +56,12 @@ def build_system_prompt(
         estado_empleado = (
             "Todavia no se ha elegido con que empleado es la cita. Empleados disponibles:\n"
             f"{lista_empleados}\n"
-            "Antes de mostrar servicios, horas disponibles, o agendar, pregunta con quien prefiere la cita "
-            "(puedes usar consultar_empleados_disponibles si necesitas la lista de nuevo), y en cuanto el cliente "
-            "elija usa seleccionar_empleado con el id correspondiente."
+            "REGLA CRITICA: SIEMPRE debes preguntarle al cliente con quien prefiere la cita antes de mostrar "
+            "servicios, horas disponibles, o agendar — nunca asumas ni elijas uno por tu cuenta. Si el cliente ya "
+            "te dijo para que dia quiere la cita, usa consultar_empleados_disponibles con ese parametro fecha para "
+            "mostrar solo a quienes trabajan ese dia (mejor que preguntar con quien y despues descubrir que no "
+            "trabaja ese dia); si todavia no sabes la fecha, usa la tool sin fecha o la lista de arriba. En cuanto "
+            "el cliente elija, usa seleccionar_empleado con el id correspondiente."
         )
     else:
         estado_empleado = (

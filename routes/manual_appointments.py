@@ -1,12 +1,57 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
 
-from services.db import get_services, create_appointment, get_employee_by_id
+from services.db import get_services, create_appointment, get_employee_by_id, supabase
 from services.scheduling import es_hora_valida, hay_choque_de_horario
-from services.auth import obtener_usuario_actual, verificar_dueno
+from services.auth import obtener_usuario_actual, verificar_acceso_empleado, verificar_dueno
 
 router = APIRouter(tags=["appointments"])
+
+
+@router.get("/appointments")
+def listar_citas(
+    business_id: str,
+    employee_id: str | None = None,
+    status: str | None = Query(default=None, pattern="^(pending|confirmed|completed|cancelled)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user_id: str = Depends(obtener_usuario_actual),
+):
+    """
+    Lista las citas de un negocio, con filtros opcionales (empleado, estado,
+    rango de fechas sobre scheduled_at) y paginacion (limit/offset). Trae
+    tambien el nombre del servicio y del empleado via join, para que el
+    frontend no tenga que resolverlos aparte.
+
+    Si se pasa employee_id, el acceso lo valida verificar_acceso_empleado
+    (el dueño del negocio, o el propio empleado viendo sus citas). Sin
+    employee_id (el dueño viendo todas las citas del negocio), requiere ser
+    el dueño.
+    """
+    if employee_id:
+        verificar_acceso_empleado(employee_id, user_id)
+    else:
+        verificar_dueno(business_id, user_id)
+
+    query = (
+        supabase.table("appointments")
+        .select("*, services(name, price, duration_minutes), employees(name)", count="exact")
+        .eq("business_id", business_id)
+    )
+    if employee_id:
+        query = query.eq("employee_id", employee_id)
+    if status:
+        query = query.eq("status", status)
+    if date_from:
+        query = query.gte("scheduled_at", date_from)
+    if date_to:
+        query = query.lte("scheduled_at", date_to)
+
+    response = query.order("scheduled_at", desc=False).range(offset, offset + limit - 1).execute()
+    return {"appointments": response.data, "total": response.count, "limit": limit, "offset": offset}
 
 
 class CrearCitaManualInput(BaseModel):

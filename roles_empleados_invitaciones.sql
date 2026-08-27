@@ -108,7 +108,7 @@ alter table appointments add column if not exists employee_id uuid references em
 -- sus citas viejas quedan ligadas a ese empleado.
 -- ---------------------------------------------------------------------
 insert into employees (business_id, user_id, name, role)
-select b.id, b.owner_id, b.name, 'owner'
+select b.id, b.owner_id, null, 'owner'
 from businesses b
 where b.owner_id is not null
 on conflict (business_id, user_id) do nothing;
