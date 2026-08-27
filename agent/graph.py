@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.errors import GraphRecursionError
@@ -67,6 +67,36 @@ def _construir_horario_texto(business_id: str) -> str:
     return "; ".join(lineas)
 
 
+def _historial_valido_para_modelo(messages: list) -> list:
+    """
+    Reconstruye el historial en el orden que exige la API de OpenAI: cada
+    AIMessage con tool_calls debe ir seguido inmediatamente de un
+    ToolMessage por cada tool_call_id. Si un tool step se cae a mitad de
+    camino (crash del proceso, excepcion no controlada, etc.) el
+    checkpoint puede quedar con tool_calls sin respuesta, o con la
+    respuesta agregada al final en vez de justo despues. Sin este
+    arreglo, la sesion queda invalida para siempre: OpenAI rechaza el
+    mismo historial en cada turno futuro y el bot repite el mensaje de
+    error tecnico sin parar.
+    """
+    tool_messages_por_id = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
+    resultado = []
+    for mensaje in messages:
+        if isinstance(mensaje, ToolMessage):
+            continue  # se reinsertan justo despues de su AIMessage, abajo
+        resultado.append(mensaje)
+        if isinstance(mensaje, AIMessage) and mensaje.tool_calls:
+            for tool_call in mensaje.tool_calls:
+                tool_msg = tool_messages_por_id.get(tool_call["id"])
+                if tool_msg is None:
+                    tool_msg = ToolMessage(
+                        content="Hubo un problema tecnico ejecutando esta accion, ignorala.",
+                        tool_call_id=tool_call["id"],
+                    )
+                resultado.append(tool_msg)
+    return resultado
+
+
 def _agent_node(state: AgentState) -> dict:
     if state.get("transferido"):
         return {"messages": [AIMessage(content=MENSAJE_TRANSFERIDO)]}
@@ -79,8 +109,9 @@ def _agent_node(state: AgentState) -> dict:
     fecha_actual = ahora_local().strftime("%Y-%m-%d %H:%M (%A)")
     system = build_system_prompt(business, horario_texto, fecha_actual, state.get("client_phone"))
 
+    historial = _historial_valido_para_modelo(state["messages"])
     try:
-        response = _model.invoke([SystemMessage(content=system)] + state["messages"])
+        response = _model.invoke([SystemMessage(content=system)] + historial)
     except Exception as e:
         print(f"Error invocando al modelo de IA: {e}")
         return {"messages": [AIMessage(content=MENSAJE_ERROR_TECNICO)]}
