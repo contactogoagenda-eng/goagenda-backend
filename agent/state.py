@@ -26,9 +26,18 @@ class AgentState(TypedDict):
     client_phone se llena solo cuando el cliente lo da en la conversacion
     (tool registrar_telefono_cliente); mientras no exista, las tools que
     necesitan identificar al cliente deben pedirlo primero.
+    employee_id identifica con que empleado es la cita: en el chat de un
+    empleado especifico lo manda la ruta en cada turno (igual que
+    business_id, no lo decide el LLM); en el chat general del negocio lo
+    llena la tool seleccionar_empleado una vez el cliente elige.
+    employee_fijo indica si employee_id vino fijado por la URL (chat de un
+    empleado especifico): en ese caso el agente nunca debe preguntar por
+    otro empleado ni llamar seleccionar_empleado.
     """
 
     messages: Annotated[list[AnyMessage], add_messages]
     business_id: str
     client_phone: Annotated[Optional[str], _ultimo_valor]
+    employee_id: Annotated[Optional[str], _ultimo_valor]
+    employee_fijo: Annotated[bool, _ultimo_valor]
     transferido: Annotated[bool, _ultimo_valor]

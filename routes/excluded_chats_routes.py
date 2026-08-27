@@ -8,7 +8,7 @@ from services.db import (
 )
 from services.auth import obtener_usuario_actual, verificar_dueno
 
-router = APIRouter()
+router = APIRouter(tags=["excluded-chats"])
 
 
 class ExcludedChatCreate(BaseModel):

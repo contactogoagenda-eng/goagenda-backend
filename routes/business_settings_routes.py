@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from services.db import supabase
-from services.auth import obtener_usuario_actual, verificar_dueno
+from services.auth import obtener_usuario_actual, verificar_acceso_negocio, verificar_dueno
 
-router = APIRouter()
+router = APIRouter(tags=["business-settings"])
 
 
 class BusinessInfoUpdate(BaseModel):
@@ -59,8 +59,12 @@ class ReminderConfigUpdate(BaseModel):
 
 @router.get("/business-settings")
 def get_business_settings(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
-    """Trae la configuracion general del negocio (incluye horas de recordatorio)."""
-    verificar_dueno(business_id, user_id)
+    """
+    Trae la configuracion general del negocio (incluye horas de recordatorio).
+    Lectura permitida al dueño y a cualquier empleado activo (ej. para que un
+    empleado vea el WhatsApp del negocio en su propio enlace de chat).
+    """
+    verificar_acceso_negocio(business_id, user_id)
     response = supabase.table("businesses").select("*").eq("id", business_id).execute()
     if not response.data:
         raise HTTPException(status_code=404, detail="Negocio no encontrado")

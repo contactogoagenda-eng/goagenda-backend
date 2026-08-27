@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from services.auth import obtener_usuario_actual
 from services.qr_card import generar_tarjeta_qr
 
-router = APIRouter()
+router = APIRouter(tags=["qr-card"])
 
 
 class QrCardRequest(BaseModel):

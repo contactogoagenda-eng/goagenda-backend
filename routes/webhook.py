@@ -8,7 +8,7 @@ load_dotenv()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 
-router = APIRouter()
+router = APIRouter(tags=["whatsapp"])
 
 
 @router.get("/webhook")

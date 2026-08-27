@@ -6,7 +6,7 @@ from postgrest.exceptions import APIError
 from services.db import supabase
 from services.auth import obtener_usuario_actual, verificar_dueno
 
-router = APIRouter()
+router = APIRouter(tags=["business-hours"])
 
 DIAS_VALIDOS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 

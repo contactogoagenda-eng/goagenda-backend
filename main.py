@@ -1,10 +1,13 @@
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
+from postgrest.exceptions import APIError
 import atexit
 import os
 
 from services.auth import obtener_usuario_actual, verificar_dueno, requiere_api_key_interna
+from services.seed_super_admin import sembrar_super_admin_por_defecto
 
 from routes.webhook import router as webhook_router
 from routes.chat_routes import router as chat_router
@@ -15,17 +18,17 @@ from services.db import supabase
 from services.reminder_service import revisar_y_enviar_recordatorios
 from routes.manual_appointments import router as manual_appointments_router
 from routes.baileys_routes import router as baileys_router
-from routes.businesses_routes import router as businesses_router
 from routes.excluded_chats_routes import router as excluded_chats_router
 from routes.qr_card_routes import router as qr_card_router
+from routes.admin_routes import router as admin_router
+from routes.invitation_codes_routes import router as invitation_codes_router
+from routes.employees_routes import router as employees_router
+from routes.me_routes import router as me_router
 
 
 load_dotenv()
 
 from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI(title="GoAgenda API")
-
 
 def _obtener_origenes_cors() -> list[str]:
     """Lee CORS_ALLOWED_ORIGINS (coma-separado) y aplica defaults de desarrollo."""
@@ -38,6 +41,28 @@ def _obtener_origenes_cors() -> list[str]:
         "http://127.0.0.1:4200",
     ]
 
+
+# Controla el orden y la descripcion de las secciones en /docs; sin esto,
+# cualquier router sin `tags` (o endpoint declarado directo en `app`) cae en
+# una seccion generica "default" que no dice nada sobre que hace cada cosa.
+TAGS_METADATA = [
+    {"name": "auth", "description": "Sesion del usuario logueado: rol (super admin) y en que negocio(s) tiene un registro de empleado."},
+    {"name": "chat", "description": "Chat publico del agente de IA (sin auth). El enlace es la unica credencial; ver la seccion 'Chat API' del README."},
+    {"name": "services", "description": "Servicios que ofrece un negocio (nombre, precio, duracion)."},
+    {"name": "employees", "description": "Empleados de un negocio: datos, horario propio y servicios a los que estan ligados. El dueño es tambien un empleado (el 'empleado principal')."},
+    {"name": "appointments", "description": "Citas creadas manualmente desde el panel (no por el chat), ej. cliente presencial o por telefono."},
+    {"name": "business-hours", "description": "Horario general del negocio (informativo; el horario real de agendamiento es el de cada empleado)."},
+    {"name": "business-settings", "description": "Configuracion general del negocio: nombre, WhatsApp, token push, recordatorios y gasto de IA."},
+    {"name": "excluded-chats", "description": "Numeros excluidos de las respuestas automaticas del bot para un negocio."},
+    {"name": "qr-card", "description": "Generacion de la tarjeta QR imprimible con el enlace del chat de un negocio."},
+    {"name": "invitations", "description": "Codigos de invitacion de 6 caracteres: el dueño invita empleados, y cualquiera los valida para quedar ligado a un negocio."},
+    {"name": "super-admin", "description": "Endpoints exclusivos del super admin: crear negocios, bloquearlos, y generar sus codigos de invitacion de dueño."},
+    {"name": "whatsapp", "description": "Integracion saliente de WhatsApp (Meta Cloud API y el microservicio Baileys): recordatorios y confirmacion de citas. El bot conversacional ya no responde por aqui."},
+    {"name": "sistema", "description": "Endpoints generales del servicio."},
+    {"name": "herramientas-internas", "description": "Endpoints de prueba/operacion protegidos con la api key interna (no para el frontend)."},
+]
+
+app = FastAPI(title="GoAgenda API", openapi_tags=TAGS_METADATA)
 
 ORIGENES_CORS = _obtener_origenes_cors()
 
@@ -59,23 +84,62 @@ app.include_router(business_hours_router)
 app.include_router(business_settings_router)
 app.include_router(manual_appointments_router)
 app.include_router(baileys_router)
-app.include_router(businesses_router)
 app.include_router(excluded_chats_router)
 app.include_router(qr_card_router)
+app.include_router(admin_router)
+app.include_router(invitation_codes_router)
+app.include_router(employees_router)
+app.include_router(me_router)
 
 
-@app.get("/")
+@app.exception_handler(APIError)
+async def manejar_error_postgrest(request: Request, exc: APIError):
+    """
+    Traduce errores crudos de Postgrest a respuestas HTTP claras, en vez de
+    dejar que revienten como 500 con un stacktrace opaco:
+    - 22P02 (invalid_text_representation): un id en la URL (business_id,
+      employee_id, etc) no tiene formato de UUID valido -> 404, igual que
+      si el recurso simplemente no existiera.
+    - PGRST205 (tabla no encontrada en el schema cache de PostgREST): falta
+      correr una migracion .sql de la raiz del repo contra la base de
+      datos, o recargar el schema cache de PostgREST despues de correrla.
+    """
+    if exc.code == "22P02":
+        return JSONResponse(status_code=404, content={"detail": "Recurso no encontrado"})
+    if exc.code == "PGRST205":
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "Falta una tabla en la base de datos. Corre las migraciones .sql de la "
+                    "raiz del repo (ver roles_empleados_invitaciones.sql) en el SQL Editor de "
+                    "Supabase, y si el error persiste recarga el schema cache de PostgREST."
+                )
+            },
+        )
+    print(f"Error de Postgrest sin manejar ({exc.code}): {exc}")
+    return JSONResponse(status_code=500, content={"detail": "Error interno"})
+
+
+# Crea (si no existe) el super admin por defecto a partir de
+# SUPER_ADMIN_EMAIL/SUPER_ADMIN_PASSWORD en el .env; no hace nada si esas
+# variables no estan configuradas. Ver services/seed_super_admin.py.
+sembrar_super_admin_por_defecto()
+
+
+@app.get("/", tags=["sistema"])
 def root():
+    """Chequeo rapido de que el backend esta corriendo (para monitoreo/uptime)."""
     return {"status": "GoAgenda backend corriendo correctamente"}
 
 
-@app.get("/test-db", dependencies=[Depends(requiere_api_key_interna)])
+@app.get("/test-db", tags=["herramientas-internas"], dependencies=[Depends(requiere_api_key_interna)])
 def test_db():
     """Endpoint de prueba para confirmar que la conexion a Supabase funciona."""
     response = supabase.table("businesses").select("*").execute()
     return {"businesses": response.data}
 
-@app.get("/ai-usage")
+@app.get("/ai-usage", tags=["business-settings"])
 def consultar_gasto_ia(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
     """Consulta el gasto estimado de IA del negocio en el mes actual."""
     verificar_dueno(business_id, user_id)
@@ -95,7 +159,7 @@ def consultar_gasto_ia(business_id: str, user_id: str = Depends(obtener_usuario_
         "porcentaje_usado": round((gasto / presupuesto) * 100, 1) if presupuesto > 0 else 0,
     }
 
-@app.post("/test-push", dependencies=[Depends(requiere_api_key_interna)])
+@app.post("/test-push", tags=["herramientas-internas"], dependencies=[Depends(requiere_api_key_interna)])
 def test_push(business_id: str):
     """Prueba el envio de notificacion push sin pasar por la IA (no gasta cuota de Gemini)."""
     from services.push_notifications import enviar_notificacion_nueva_cita
@@ -119,7 +183,7 @@ def test_push(business_id: str):
     return {"status": "Notificacion enviada (revisa tu celular)"}
 
 
-@app.post("/test-reminders", dependencies=[Depends(requiere_api_key_interna)])
+@app.post("/test-reminders", tags=["herramientas-internas"], dependencies=[Depends(requiere_api_key_interna)])
 def test_reminders():
     """Endpoint para probar manualmente el envio de recordatorios sin esperar al scheduler."""
     enviados = revisar_y_enviar_recordatorios()

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from services.db import supabase as client_supabase, get_confirmed_appointments_for_day
+from services.db import get_confirmed_appointments_for_day, get_employee_hours_for_day
 
 TZ_NEGOCIO = ZoneInfo("America/Bogota")
 
@@ -55,29 +55,27 @@ def formatear_fecha_natural(fecha_hora: datetime) -> str:
         return f"{dia_semana} {fecha_hora.day} de {mes} a las {hora_texto}"
 
 
-def obtener_horario_dia(business_id: str, dia_codigo: str):
-    response = (
-        client_supabase.table("business_hours")
-        .select("*")
-        .eq("business_id", business_id)
-        .eq("day", dia_codigo)
-        .execute()
-    )
-    if response.data:
-        return response.data[0]
-    return None
-
-
-def generar_horas_disponibles(business_id: str, fecha_str: str, duracion_minutos: int = 30) -> list[str]:
+def obtener_horario_dia(employee_id: str, dia_codigo: str):
     """
-    Calcula los horarios libres de un dia especifico, en intervalos de 30 minutos,
-    excluyendo: dias cerrados, horario de almuerzo, y citas ya confirmadas.
+    Horario de trabajo de un empleado especifico para un dia de la semana.
+    Cada empleado tiene su propia agenda y horario (independiente del de
+    otros empleados del mismo negocio).
+    """
+    return get_employee_hours_for_day(employee_id, dia_codigo)
+
+
+def generar_horas_disponibles(business_id: str, employee_id: str, fecha_str: str, duracion_minutos: int = 30) -> list[str]:
+    """
+    Calcula los horarios libres de un empleado especifico en un dia dado,
+    en intervalos de 30 minutos, excluyendo: dias que no trabaja, su
+    horario de almuerzo, y sus citas ya confirmadas (no las de otros
+    empleados del mismo negocio, que tienen su propia agenda).
     """
     fecha_dt = datetime.fromisoformat(fecha_str)
     dias_map = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     dia_codigo = dias_map[fecha_dt.weekday()]
 
-    horario_dia = obtener_horario_dia(business_id, dia_codigo)
+    horario_dia = obtener_horario_dia(employee_id, dia_codigo)
     if not horario_dia or not horario_dia.get("is_open"):
         return []
 
@@ -89,7 +87,7 @@ def generar_horas_disponibles(business_id: str, fecha_str: str, duracion_minutos
     hora_apertura = datetime.combine(fecha_dt.date(), datetime.strptime(opening, "%H:%M:%S").time())
     hora_cierre = datetime.combine(fecha_dt.date(), datetime.strptime(closing, "%H:%M:%S").time())
 
-    citas_del_dia = get_confirmed_appointments_for_day(business_id, fecha_dt.strftime("%Y-%m-%d"))
+    citas_del_dia = get_confirmed_appointments_for_day(business_id, fecha_dt.strftime("%Y-%m-%d"), employee_id)
     intervalos_ocupados = []
     for cita in citas_del_dia:
         inicio_cita = datetime.fromisoformat(cita["scheduled_at"])
@@ -128,7 +126,7 @@ def generar_horas_disponibles(business_id: str, fecha_str: str, duracion_minutos
     return horas_libres
 
 
-def es_hora_valida(fecha_hora_str: str, business_id: str) -> tuple[bool, str]:
+def es_hora_valida(fecha_hora_str: str, employee_id: str) -> tuple[bool, str]:
     try:
         fecha_hora = datetime.fromisoformat(fecha_hora_str)
     except ValueError:
@@ -137,10 +135,10 @@ def es_hora_valida(fecha_hora_str: str, business_id: str) -> tuple[bool, str]:
     dias_map = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     dia_codigo = dias_map[fecha_hora.weekday()]
 
-    horario_dia = obtener_horario_dia(business_id, dia_codigo)
+    horario_dia = obtener_horario_dia(employee_id, dia_codigo)
 
     if not horario_dia or not horario_dia.get("is_open"):
-        return False, f"El negocio no atiende los {DIAS_SEMANA_ES[dia_codigo]}."
+        return False, f"No atiende los {DIAS_SEMANA_ES[dia_codigo]}."
 
     opening = horario_dia.get("opening_time", "09:00:00")
     closing = horario_dia.get("closing_time", "19:00:00")
@@ -159,13 +157,18 @@ def es_hora_valida(fecha_hora_str: str, business_id: str) -> tuple[bool, str]:
 
 
 def hay_choque_de_horario(
-    business_id: str, fecha_hora: datetime, duracion_minutos: int, ignorar_appointment_id: str | None = None
+    business_id: str,
+    employee_id: str,
+    fecha_hora: datetime,
+    duracion_minutos: int,
+    ignorar_appointment_id: str | None = None,
 ) -> tuple[bool, str]:
+    """Choque de horario dentro de la agenda de UN empleado; otro empleado del mismo negocio si puede tener una cita a la misma hora."""
     fecha_str = fecha_hora.strftime("%Y-%m-%d")
     nuevo_inicio = fecha_hora
     nuevo_fin = fecha_hora + timedelta(minutes=duracion_minutos)
 
-    citas_del_dia = get_confirmed_appointments_for_day(business_id, fecha_str)
+    citas_del_dia = get_confirmed_appointments_for_day(business_id, fecha_str, employee_id)
 
     for cita in citas_del_dia:
         if ignorar_appointment_id and cita.get("id") == ignorar_appointment_id:

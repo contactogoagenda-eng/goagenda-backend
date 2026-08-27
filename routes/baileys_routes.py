@@ -6,7 +6,7 @@ from services.auth import obtener_usuario_actual, verificar_dueno, requiere_api_
 from services.baileys_client import solicitar_pairing_code, estado_conexion
 from services.db import get_business_by_id
 
-router = APIRouter()
+router = APIRouter(tags=["whatsapp"])
 
 
 class BaileysMessageInput(BaseModel):

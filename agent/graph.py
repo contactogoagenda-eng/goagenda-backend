@@ -12,7 +12,7 @@ from agent.state import AgentState
 from agent.tools import TOOLS
 from core.settings import CHAT_MODEL_NAME, DATABASE_URL, OPENAI_API_KEY
 from services.ai_usage_tracking import registrar_uso
-from services.db import get_business_by_id, supabase as client_supabase
+from services.db import get_business_by_id, get_employees, get_employee_services, supabase as client_supabase
 from services.scheduling import DIAS_SEMANA_ES, ahora_local
 
 MENSAJE_TRANSFERIDO = (
@@ -107,7 +107,23 @@ def _agent_node(state: AgentState) -> dict:
 
     horario_texto = _construir_horario_texto(state["business_id"])
     fecha_actual = ahora_local().strftime("%Y-%m-%d %H:%M (%A)")
-    system = build_system_prompt(business, horario_texto, fecha_actual, state.get("client_phone"))
+    empleados = [
+        {
+            "id": e["id"],
+            "name": e.get("name") or "Sin nombre",
+            "servicios": [s["name"] for s in get_employee_services(e["id"])],
+        }
+        for e in get_employees(state["business_id"])
+    ]
+    system = build_system_prompt(
+        business,
+        horario_texto,
+        fecha_actual,
+        state.get("client_phone"),
+        empleados,
+        state.get("employee_id"),
+        state.get("employee_fijo", False),
+    )
 
     historial = _historial_valido_para_modelo(state["messages"])
     try:
@@ -151,14 +167,20 @@ def _thread_config(business_id: str, session_id: str) -> dict:
     }
 
 
-def enviar_mensaje(business_id: str, session_id: str, mensaje: str) -> str:
-    """Manda un mensaje del cliente al agente y devuelve la respuesta en texto."""
+def enviar_mensaje(business_id: str, session_id: str, mensaje: str, employee_id: str | None = None) -> str:
+    """
+    Manda un mensaje del cliente al agente y devuelve la respuesta en texto.
+    Si employee_id viene dado (chat propio de un empleado), se manda en
+    CADA invocacion del grafo, igual que business_id: asi queda fijo de
+    forma confiable sin depender de que el modelo no intente cambiarlo.
+    """
     config = _thread_config(business_id, session_id)
+    entrada = {"messages": [HumanMessage(content=mensaje)], "business_id": business_id}
+    if employee_id:
+        entrada["employee_id"] = employee_id
+        entrada["employee_fijo"] = True
     try:
-        resultado = GRAPH.invoke(
-            {"messages": [HumanMessage(content=mensaje)], "business_id": business_id},
-            config=config,
-        )
+        resultado = GRAPH.invoke(entrada, config=config)
     except GraphRecursionError:
         return MENSAJE_LIMITE_RONDAS
 

@@ -34,23 +34,28 @@ def get_business_by_id(business_id: str):
     return None
 
 
-def get_confirmed_appointments_for_day(business_id: str, fecha: str):
+def get_confirmed_appointments_for_day(business_id: str, fecha: str, employee_id: str | None = None):
     """
-    Trae todas las citas confirmadas de un negocio para un dia especifico (fecha 'YYYY-MM-DD'),
+    Trae las citas confirmadas de un negocio para un dia especifico (fecha 'YYYY-MM-DD'),
     junto con la duracion de su servicio. Se usa para detectar choques de horario.
+    Si se pasa employee_id, solo trae las citas de ese empleado (cada uno
+    tiene su propia agenda, asi que dos empleados pueden tener una cita a
+    la misma hora sin que sea un choque real).
     """
     inicio_dia = f"{fecha}T00:00:00"
     fin_dia = f"{fecha}T23:59:59"
 
-    response = (
+    query = (
         supabase.table("appointments")
         .select("*, services(duration_minutes)")
         .eq("business_id", business_id)
         .eq("status", "confirmed")
         .gte("scheduled_at", inicio_dia)
         .lte("scheduled_at", fin_dia)
-        .execute()
     )
+    if employee_id:
+        query = query.eq("employee_id", employee_id)
+    response = query.execute()
     return response.data
 
 
@@ -66,8 +71,10 @@ def get_services(business_id: str):
     return response.data
 
 
-def create_appointment(business_id: str, client_phone: str, client_name: str, service_id: str, scheduled_at: str):
-    """Crea una nueva cita."""
+def create_appointment(
+    business_id: str, client_phone: str, client_name: str, service_id: str, scheduled_at: str, employee_id: str
+):
+    """Crea una nueva cita, ligada al empleado que la atiende."""
     response = (
         supabase.table("appointments")
         .insert(
@@ -77,6 +84,7 @@ def create_appointment(business_id: str, client_phone: str, client_name: str, se
                 "client_name": client_name,
                 "service_id": service_id,
                 "scheduled_at": scheduled_at,
+                "employee_id": employee_id,
                 "status": "confirmed",
             }
         )
@@ -209,3 +217,103 @@ def update_appointment_schedule(appointment_id: str, nueva_fecha_hora: str):
         .execute()
     )
     return response.data
+
+
+DIAS_VALIDOS_HORARIO = ["mon", "tue", "wed", "thu", "fri", "sat"]
+
+
+def get_employees(business_id: str, solo_activos: bool = True):
+    """Lista los empleados de un negocio (el dueño incluido, role='owner')."""
+    query = supabase.table("employees").select("*").eq("business_id", business_id)
+    if solo_activos:
+        query = query.eq("active", True)
+    response = query.order("created_at").execute()
+    return response.data
+
+
+def get_employee_by_id(employee_id: str):
+    response = supabase.table("employees").select("*").eq("id", employee_id).execute()
+    if response.data:
+        return response.data[0]
+    return None
+
+
+def create_employee(business_id: str, user_id: str, name: str | None, role: str) -> dict:
+    """
+    Crea un empleado (role='owner' para el dueño al reclamar su negocio, o
+    'staff' para un empleado normal) y le siembra un horario por defecto
+    (lunes a sabado 9am-7pm, domingo cerrado) para que ya pueda recibir
+    citas; el dueño lo ajusta despues desde la app.
+    """
+    response = (
+        supabase.table("employees")
+        .insert({"business_id": business_id, "user_id": user_id, "name": name, "role": role})
+        .execute()
+    )
+    empleado = response.data[0]
+
+    try:
+        filas_horario = [
+            {
+                "employee_id": empleado["id"],
+                "day": dia,
+                "is_open": True,
+                "opening_time": "09:00",
+                "closing_time": "19:00",
+            }
+            for dia in DIAS_VALIDOS_HORARIO
+        ]
+        filas_horario.append({"employee_id": empleado["id"], "day": "sun", "is_open": False})
+        supabase.table("employee_hours").insert(filas_horario).execute()
+    except Exception as e:
+        print(f"No se pudo crear el horario por defecto del empleado {empleado['id']}: {e}")
+
+    return empleado
+
+
+def update_employee(employee_id: str, campos: dict) -> dict | None:
+    response = supabase.table("employees").update(campos).eq("id", employee_id).execute()
+    return response.data[0] if response.data else None
+
+
+def get_employee_hours(employee_id: str):
+    response = supabase.table("employee_hours").select("*").eq("employee_id", employee_id).execute()
+    return response.data
+
+
+def get_employee_hours_for_day(employee_id: str, dia_codigo: str):
+    response = (
+        supabase.table("employee_hours")
+        .select("*")
+        .eq("employee_id", employee_id)
+        .eq("day", dia_codigo)
+        .execute()
+    )
+    if response.data:
+        return response.data[0]
+    return None
+
+
+def upsert_employee_hours(employee_id: str, dia: str, campos: dict) -> dict | None:
+    fila = {"employee_id": employee_id, "day": dia, **campos}
+    response = supabase.table("employee_hours").upsert(fila, on_conflict="employee_id,day").execute()
+    return response.data[0] if response.data else None
+
+
+def get_employee_services(employee_id: str):
+    """Servicios activos a los que esta ligado un empleado."""
+    response = (
+        supabase.table("employee_services")
+        .select("service_id, services(*)")
+        .eq("employee_id", employee_id)
+        .execute()
+    )
+    return [fila["services"] for fila in response.data if fila.get("services") and fila["services"].get("active")]
+
+
+def set_employee_services(employee_id: str, service_ids: list[str]):
+    """Reemplaza por completo la lista de servicios ligados a un empleado."""
+    supabase.table("employee_services").delete().eq("employee_id", employee_id).execute()
+    if service_ids:
+        filas = [{"employee_id": employee_id, "service_id": sid} for sid in service_ids]
+        supabase.table("employee_services").insert(filas).execute()

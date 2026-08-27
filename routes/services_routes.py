@@ -3,9 +3,9 @@ from pydantic import BaseModel
 from typing import Optional
 
 from services.db import supabase
-from services.auth import obtener_usuario_actual, verificar_dueno
+from services.auth import obtener_usuario_actual, verificar_acceso_negocio, verificar_dueno
 
-router = APIRouter()
+router = APIRouter(tags=["services"])
 
 
 class ServiceCreate(BaseModel):
@@ -36,8 +36,12 @@ def _business_id_de_servicio(service_id: str) -> str:
 
 @router.get("/services")
 def list_services(business_id: str, user_id: str = Depends(obtener_usuario_actual)):
-    """Lista los servicios ACTIVOS de un negocio."""
-    verificar_dueno(business_id, user_id)
+    """
+    Lista los servicios ACTIVOS de un negocio. Lectura permitida al dueño y a
+    cualquier empleado activo (ej. para que un empleado vea el catalogo al
+    mostrar sus propias citas).
+    """
+    verificar_acceso_negocio(business_id, user_id)
     response = (
         supabase.table("services")
         .select("*")

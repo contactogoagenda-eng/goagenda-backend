@@ -66,10 +66,12 @@ Endpoints publicos (sin autenticacion — el enlace es la unica "credencial") ai
 
 | Metodo y ruta | Que hace |
 |---|---|
-| `GET /chat/{business_id}/config` | Info publica para que el widget arranque: `{business_id, name, business_type, enabled}`. `enabled` es `false` si el negocio tiene `plan == "none"`. 404 si el negocio no existe. |
+| `GET /chat/{business_id}/config` | Info publica para que el widget arranque: `{business_id, name, business_type, enabled}`. `enabled` es `false` si el negocio tiene `plan == "none"` o esta bloqueado (`blocked`). 404 si el negocio no existe. |
 | `POST /chat/{business_id}/sessions` | Crea una sesion de chat nueva (conversacion vacia) y devuelve `{"session_id": "<uuid>"}`. El frontend la guarda (ej. `localStorage`) y la reutiliza en cada mensaje de esa visita; para empezar de cero, crea otra sesion. |
-| `POST /chat/{business_id}/sessions/{session_id}/messages` | Body `{"mensaje": "..."}` → `{"respuesta": "..."}`. Manda el mensaje del cliente al agente y devuelve su respuesta. |
+| `POST /chat/{business_id}/sessions/{session_id}/messages` | Body `{"mensaje": "..."}` → `{"respuesta": "..."}`. Manda el mensaje del cliente al agente y devuelve su respuesta. En este chat general, si el negocio tiene mas de un empleado activo, el propio agente le pregunta al cliente con quien quiere la cita. |
 | `GET /chat/{business_id}/sessions/{session_id}/messages` | `{"session_id", "mensajes": [{"role": "user"|"assistant", "content": "..."}]}`. Historial de la sesion, util para recargarlo si el cliente refresca la pagina. |
+
+Cada empleado tiene ademas su propio enlace de chat, con el mismo contrato pero el empleado ya fijo (el agente no pregunta, y solo ofrece los servicios de ese empleado): `GET /chat/{business_id}/{employee_id}/config` (incluye `employee_id`/`employee_name`), `POST /chat/{business_id}/{employee_id}/sessions`, `POST /chat/{business_id}/{employee_id}/sessions/{session_id}/messages`, `GET /chat/{business_id}/{employee_id}/sessions/{session_id}/messages`. 404 si el empleado no existe, no es de ese negocio, o esta inactivo.
 
 Ejemplo de flujo completo con `curl`:
 

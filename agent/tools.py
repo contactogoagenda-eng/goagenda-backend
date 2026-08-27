@@ -13,6 +13,9 @@ from services.db import (
     get_client_appointments,
     get_appointment_by_id_and_phone,
     update_appointment_schedule,
+    get_employees,
+    get_employee_by_id,
+    get_employee_services,
 )
 from services.scheduling import (
     DIAS_SEMANA_ES,
@@ -24,6 +27,7 @@ from services.scheduling import (
 
 BusinessId = Annotated[str, InjectedState("business_id")]
 ClientPhone = Annotated[Optional[str], InjectedState("client_phone")]
+EmployeeId = Annotated[Optional[str], InjectedState("employee_id")]
 
 
 @tool
@@ -62,8 +66,70 @@ def registrar_telefono_cliente(
 
 
 @tool
-def consultar_servicios_disponibles(business_id: BusinessId) -> dict:
-    """Consulta los servicios activos que ofrece el negocio, con precio y duracion."""
+def consultar_empleados_disponibles(business_id: BusinessId) -> dict:
+    """
+    Lista los empleados activos del negocio con los servicios que cada uno
+    ofrece. Usa esta tool cuando necesites saber con quien puede ser la
+    cita (para preguntarle al cliente, si hay mas de uno) antes de
+    mostrar servicios, horas disponibles, o agendar.
+    """
+    empleados = get_employees(business_id)
+    return {
+        "empleados": [
+            {
+                "id": e["id"],
+                "nombre": e.get("name") or "Sin nombre",
+                "servicios": [s["name"] for s in get_employee_services(e["id"])],
+            }
+            for e in empleados
+        ]
+    }
+
+
+@tool
+def seleccionar_empleado(
+    employee_id: Annotated[str, Field(description="El id del empleado elegido (de consultar_empleados_disponibles).")],
+    business_id: BusinessId,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """
+    Guarda con que empleado va a ser la cita, despues de que el cliente lo
+    elija (o cuando solo hay un empleado y lo eliges automaticamente sin
+    preguntar). A partir de aqui, servicios y horas disponibles se
+    consultan para ese empleado especifico.
+    """
+    empleado = get_employee_by_id(employee_id)
+    if not empleado or empleado["business_id"] != business_id or not empleado.get("active"):
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content="Ese empleado no existe o ya no esta disponible.", tool_call_id=tool_call_id)
+                ]
+            }
+        )
+
+    return Command(
+        update={
+            "employee_id": employee_id,
+            "messages": [
+                ToolMessage(
+                    content=f"Empleado seleccionado: {empleado.get('name') or employee_id}",
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        }
+    )
+
+
+@tool
+def consultar_servicios_disponibles(business_id: BusinessId, employee_id: EmployeeId) -> dict:
+    """
+    Consulta los servicios activos que ofrece el negocio (o, si ya se
+    selecciono un empleado, solo los que ESE empleado ofrece), con precio
+    y duracion.
+    """
+    if employee_id:
+        return {"servicios": get_employee_services(employee_id)}
     return {"servicios": get_services(business_id)}
 
 
@@ -71,19 +137,26 @@ def consultar_servicios_disponibles(business_id: BusinessId) -> dict:
 def consultar_horas_disponibles(
     fecha: Annotated[str, Field(description="Fecha en formato YYYY-MM-DD (la hora se ignora, usa 00:00:00).")],
     business_id: BusinessId,
+    employee_id: EmployeeId,
     servicio_nombre: Annotated[
         Optional[str], Field(description="Nombre del servicio, para calcular la duracion correcta. Opcional.")
     ] = None,
 ) -> dict:
     """
-    Consulta las horas realmente disponibles (libres) de un dia especifico,
-    considerando el horario de atencion, el almuerzo y las citas ya
-    agendadas. Usa esto cuando el cliente pregunte que horas hay
-    disponibles, o antes de sugerir una hora para agendar.
+    Consulta las horas realmente disponibles (libres) de un dia especifico
+    PARA EL EMPLEADO YA SELECCIONADO, considerando su horario de trabajo,
+    su almuerzo y sus citas ya agendadas (la agenda de cada empleado es
+    independiente). Usa esto cuando el cliente pregunte que horas hay
+    disponibles, o antes de sugerir una hora para agendar. Si todavia no
+    hay un empleado seleccionado, esta tool devuelve un error: primero usa
+    consultar_empleados_disponibles y seleccionar_empleado.
     """
+    if not employee_id:
+        return {"error": "Primero hay que saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
+
     duracion = 30
     if servicio_nombre:
-        servicios = get_services(business_id)
+        servicios = get_employee_services(employee_id)
         servicio = next((s for s in servicios if s["name"].lower() == servicio_nombre.lower()), None)
         if servicio:
             duracion = servicio.get("duration_minutes", 30)
@@ -92,15 +165,15 @@ def consultar_horas_disponibles(
     fecha_dt = datetime.fromisoformat(fecha_iso)
     dias_map = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     dia_codigo = dias_map[fecha_dt.weekday()]
-    horario_dia = obtener_horario_dia(business_id, dia_codigo)
+    horario_dia = obtener_horario_dia(employee_id, dia_codigo)
     negocio_abierto_ese_dia = bool(horario_dia and horario_dia.get("is_open"))
 
-    horas_libres = generar_horas_disponibles(business_id, fecha_iso, duracion)
+    horas_libres = generar_horas_disponibles(business_id, employee_id, fecha_iso, duracion)
     return {
         "horas_disponibles": horas_libres,
         # La IA necesita esto para poder explicarle al cliente POR QUE no hay
-        # horas (negocio cerrado ese dia vs. simplemente todo ocupado), en vez
-        # de adivinar o saltar de dia en silencio.
+        # horas (el empleado no trabaja ese dia vs. simplemente todo ocupado),
+        # en vez de adivinar o saltar de dia en silencio.
         "negocio_abierto_ese_dia": negocio_abierto_ese_dia,
         "dia_semana": DIAS_SEMANA_ES[dia_codigo],
     }
@@ -113,24 +186,27 @@ def crear_cita(
     nombre_cliente: Annotated[str, Field(description="Nombre del cliente.")],
     business_id: BusinessId,
     client_phone: ClientPhone,
+    employee_id: EmployeeId,
 ) -> dict:
-    """Crea una cita nueva para el cliente, validando horario y disponibilidad."""
+    """Crea una cita nueva para el cliente, validando horario y disponibilidad del empleado seleccionado."""
     if not client_phone:
         return {"error": "Antes de agendar necesito el numero de WhatsApp o celular del cliente. Pidelo y usa registrar_telefono_cliente."}
+    if not employee_id:
+        return {"error": "Antes de agendar necesito saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
 
-    es_valida, mensaje_error = es_hora_valida(fecha_hora, business_id)
+    es_valida, mensaje_error = es_hora_valida(fecha_hora, employee_id)
     if not es_valida:
         return {"error": mensaje_error}
 
-    servicios = get_services(business_id)
+    servicios = get_employee_services(employee_id)
     servicio = next((s for s in servicios if s["name"].lower() == servicio_nombre.lower()), None)
     if not servicio:
-        return {"error": f"No encontre el servicio '{servicio_nombre}'. Servicios disponibles: {[s['name'] for s in servicios]}"}
+        return {"error": f"No encontre el servicio '{servicio_nombre}' para ese empleado. Servicios disponibles: {[s['name'] for s in servicios]}"}
 
     fecha_hora_dt = datetime.fromisoformat(fecha_hora)
     duracion = servicio.get("duration_minutes", 30)
 
-    hay_choque, mensaje_choque = hay_choque_de_horario(business_id, fecha_hora_dt, duracion)
+    hay_choque, mensaje_choque = hay_choque_de_horario(business_id, employee_id, fecha_hora_dt, duracion)
     if hay_choque:
         return {"error": mensaje_choque}
 
@@ -140,6 +216,7 @@ def crear_cita(
         client_name=nombre_cliente,
         service_id=servicio["id"],
         scheduled_at=fecha_hora,
+        employee_id=employee_id,
     )
 
     try:
@@ -225,18 +302,19 @@ def reprogramar_cita(
     if not cita_actual:
         return {"error": "No encontre esa cita para este cliente."}
 
+    empleado_id_cita = cita_actual["employee_id"]
     fecha_hora_anterior = datetime.fromisoformat(cita_actual["scheduled_at"])
     duracion = cita_actual.get("services", {}).get("duration_minutes", 30) if cita_actual.get("services") else 30
     nombre_servicio = cita_actual.get("services", {}).get("name", "tu cita") if cita_actual.get("services") else "tu cita"
 
-    es_valida, mensaje_error = es_hora_valida(nueva_fecha_hora, business_id)
+    es_valida, mensaje_error = es_hora_valida(nueva_fecha_hora, empleado_id_cita)
     if not es_valida:
         return {"error": mensaje_error}
 
     nueva_fecha_hora_dt = datetime.fromisoformat(nueva_fecha_hora)
 
     hay_choque, mensaje_choque = hay_choque_de_horario(
-        business_id, nueva_fecha_hora_dt, duracion, ignorar_appointment_id=appointment_id
+        business_id, empleado_id_cita, nueva_fecha_hora_dt, duracion, ignorar_appointment_id=appointment_id
     )
     if hay_choque:
         return {"error": mensaje_choque}
@@ -283,6 +361,8 @@ def transferir_a_equipo(tool_call_id: Annotated[str, InjectedToolCallId]) -> Com
 
 TOOLS = [
     registrar_telefono_cliente,
+    consultar_empleados_disponibles,
+    seleccionar_empleado,
     consultar_servicios_disponibles,
     consultar_horas_disponibles,
     crear_cita,
