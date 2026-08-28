@@ -31,6 +31,19 @@ ClientPhone = Annotated[Optional[str], InjectedState("client_phone")]
 EmployeeId = Annotated[Optional[str], InjectedState("employee_id")]
 
 
+def _formato_hora_12h(hora_24: str) -> str:
+    """Convierte 'HH:MM' (24h) a texto tipo '9:00 am', para mostrarle al cliente."""
+    return datetime.strptime(hora_24, "%H:%M").strftime("%I:%M %p").lstrip("0").lower()
+
+
+def _formato_precio_cop(precio) -> str:
+    """Formatea un precio como '$15.000' (separador de miles con punto, sin decimales)."""
+    try:
+        return f"${int(round(float(precio))):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "$0"
+
+
 @tool
 def registrar_telefono_cliente(
     telefono: Annotated[str, Field(description="Numero de WhatsApp o celular que dio el cliente, en cualquier formato.")],
@@ -69,6 +82,7 @@ def registrar_telefono_cliente(
 @tool
 def consultar_empleados_disponibles(
     business_id: BusinessId,
+    tool_call_id: Annotated[str, InjectedToolCallId],
     fecha: Annotated[
         Optional[str],
         Field(
@@ -80,7 +94,7 @@ def consultar_empleados_disponibles(
             )
         ),
     ] = None,
-) -> dict:
+) -> Command:
     """
     Lista los empleados activos del negocio (opcionalmente filtrados a los
     que trabajan un dia especifico) con los servicios que cada uno ofrece.
@@ -99,7 +113,7 @@ def consultar_empleados_disponibles(
         except ValueError:
             pass  # fecha con formato invalido: mejor listar todos que fallar la tool
 
-    return {
+    resultado = {
         "empleados": [
             {
                 "id": e["id"],
@@ -109,6 +123,21 @@ def consultar_empleados_disponibles(
             for e in empleados
         ]
     }
+
+    return Command(
+        update={
+            # Opciones de seleccion rapida para el widget de chat: el cliente
+            # puede tocar un boton en vez de escribir el nombre del empleado.
+            "ultimas_opciones": [
+                {"label": e["nombre"], "value": e["nombre"]} for e in resultado["empleados"]
+            ],
+            "messages": [
+                ToolMessage(
+                    content=str(resultado), name="consultar_empleados_disponibles", tool_call_id=tool_call_id
+                )
+            ],
+        }
+    )
 
 
 @tool
@@ -147,15 +176,37 @@ def seleccionar_empleado(
 
 
 @tool
-def consultar_servicios_disponibles(business_id: BusinessId, employee_id: EmployeeId) -> dict:
+def consultar_servicios_disponibles(
+    business_id: BusinessId,
+    employee_id: EmployeeId,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
     """
     Consulta los servicios activos que ofrece el negocio (o, si ya se
     selecciono un empleado, solo los que ESE empleado ofrece), con precio
     y duracion.
     """
-    if employee_id:
-        return {"servicios": get_employee_services(employee_id)}
-    return {"servicios": get_services(business_id)}
+    servicios = get_employee_services(employee_id) if employee_id else get_services(business_id)
+    resultado = {"servicios": servicios}
+
+    return Command(
+        update={
+            # Opciones de seleccion rapida: el cliente toca el servicio en vez
+            # de escribir su nombre exacto.
+            "ultimas_opciones": [
+                {
+                    "label": f"{s['name']} · {s['duration_minutes']} min · {_formato_precio_cop(s['price'])}",
+                    "value": s["name"],
+                }
+                for s in servicios
+            ],
+            "messages": [
+                ToolMessage(
+                    content=str(resultado), name="consultar_servicios_disponibles", tool_call_id=tool_call_id
+                )
+            ],
+        }
+    )
 
 
 @tool
@@ -163,10 +214,11 @@ def consultar_horas_disponibles(
     fecha: Annotated[str, Field(description="Fecha en formato YYYY-MM-DD (la hora se ignora, usa 00:00:00).")],
     business_id: BusinessId,
     employee_id: EmployeeId,
+    tool_call_id: Annotated[str, InjectedToolCallId],
     servicio_nombre: Annotated[
         Optional[str], Field(description="Nombre del servicio, para calcular la duracion correcta. Opcional.")
     ] = None,
-) -> dict:
+) -> Command:
     """
     Consulta las horas realmente disponibles (libres) de un dia especifico
     PARA EL EMPLEADO YA SELECCIONADO, considerando su horario de trabajo,
@@ -177,7 +229,8 @@ def consultar_horas_disponibles(
     consultar_empleados_disponibles y seleccionar_empleado.
     """
     if not employee_id:
-        return {"error": "Primero hay que saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
+        error = {"error": "Primero hay que saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
+        return Command(update={"messages": [ToolMessage(content=str(error), tool_call_id=tool_call_id)]})
 
     duracion = 30
     if servicio_nombre:
@@ -194,7 +247,7 @@ def consultar_horas_disponibles(
     negocio_abierto_ese_dia = bool(horario_dia and horario_dia.get("is_open"))
 
     horas_libres = generar_horas_disponibles(business_id, employee_id, fecha_iso, duracion)
-    return {
+    resultado = {
         "horas_disponibles": horas_libres,
         # La IA necesita esto para poder explicarle al cliente POR QUE no hay
         # horas (el empleado no trabaja ese dia vs. simplemente todo ocupado),
@@ -202,6 +255,21 @@ def consultar_horas_disponibles(
         "negocio_abierto_ese_dia": negocio_abierto_ese_dia,
         "dia_semana": DIAS_SEMANA_ES[dia_codigo],
     }
+
+    return Command(
+        update={
+            # Opciones de seleccion rapida: el cliente toca la hora en vez de
+            # escribirla. Se ofrecen todas las horas libres (el texto del
+            # mensaje puede curar una sublista mas corta, pero los botones
+            # dan la disponibilidad real completa).
+            "ultimas_opciones": [
+                {"label": _formato_hora_12h(h), "value": _formato_hora_12h(h)} for h in horas_libres
+            ],
+            "messages": [
+                ToolMessage(content=str(resultado), name="consultar_horas_disponibles", tool_call_id=tool_call_id)
+            ],
+        }
+    )
 
 
 @tool

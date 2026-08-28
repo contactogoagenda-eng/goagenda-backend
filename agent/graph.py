@@ -31,6 +31,14 @@ MENSAJE_NEGOCIO_NO_DISPONIBLE = (
 
 RECURSION_LIMIT = 12
 
+# Tools cuyo resultado el widget de chat puede ofrecer como botones de
+# seleccion rapida (el cliente toca en vez de escribir).
+_TOOLS_CON_OPCIONES = {
+    "consultar_empleados_disponibles",
+    "consultar_servicios_disponibles",
+    "consultar_horas_disponibles",
+}
+
 # Pool y checkpointer se crean una sola vez al importar el modulo (mismo
 # patron que el singleton `supabase` de services/db.py). setup() crea las
 # tablas propias del checkpointer (checkpoints, checkpoint_writes, etc) la
@@ -167,27 +175,51 @@ def _thread_config(business_id: str, session_id: str) -> dict:
     }
 
 
-def enviar_mensaje(business_id: str, session_id: str, mensaje: str, employee_id: str | None = None) -> str:
+def _extraer_opciones(mensajes_nuevos: list, ultimas_opciones: list[dict] | None) -> list[dict] | None:
     """
-    Manda un mensaje del cliente al agente y devuelve la respuesta en texto.
-    Si employee_id viene dado (chat propio de un empleado), se manda en
-    CADA invocacion del grafo, igual que business_id: asi queda fijo de
-    forma confiable sin depender de que el modelo no intente cambiarlo.
+    Opciones de seleccion rapida (botones) para el widget de chat, solo si
+    la ULTIMA tool ejecutada en este turno fue una de listado (empleados,
+    servicios u horas). Si el turno no llamo ninguna, o la ultima fue otra
+    (ej. seleccionar_empleado despues de listar, o crear_cita), no se
+    muestran botones — evita ofrecer opciones "viejas" que ya no aplican.
+    """
+    for mensaje in reversed(mensajes_nuevos):
+        if isinstance(mensaje, ToolMessage):
+            return ultimas_opciones or None if mensaje.name in _TOOLS_CON_OPCIONES else None
+    return None
+
+
+def enviar_mensaje(
+    business_id: str, session_id: str, mensaje: str, employee_id: str | None = None
+) -> tuple[str, list[dict] | None]:
+    """
+    Manda un mensaje del cliente al agente y devuelve (respuesta_en_texto,
+    opciones_de_seleccion_rapida). Si employee_id viene dado (chat propio
+    de un empleado), se manda en CADA invocacion del grafo, igual que
+    business_id: asi queda fijo de forma confiable sin depender de que el
+    modelo no intente cambiarlo.
     """
     config = _thread_config(business_id, session_id)
     entrada = {"messages": [HumanMessage(content=mensaje)], "business_id": business_id}
     if employee_id:
         entrada["employee_id"] = employee_id
         entrada["employee_fijo"] = True
+
+    snapshot_previo = GRAPH.get_state(config)
+    mensajes_previos = len(snapshot_previo.values.get("messages", [])) if snapshot_previo and snapshot_previo.values else 0
+
     try:
         resultado = GRAPH.invoke(entrada, config=config)
     except GraphRecursionError:
-        return MENSAJE_LIMITE_RONDAS
+        return MENSAJE_LIMITE_RONDAS, None
+
+    mensajes_nuevos = resultado["messages"][mensajes_previos:]
+    opciones = _extraer_opciones(mensajes_nuevos, resultado.get("ultimas_opciones"))
 
     for mensaje_respuesta in reversed(resultado["messages"]):
         if isinstance(mensaje_respuesta, AIMessage) and mensaje_respuesta.content:
-            return mensaje_respuesta.content
-    return MENSAJE_ERROR_TECNICO
+            return mensaje_respuesta.content, opciones
+    return MENSAJE_ERROR_TECNICO, None
 
 
 def obtener_historial(business_id: str, session_id: str) -> list[dict]:

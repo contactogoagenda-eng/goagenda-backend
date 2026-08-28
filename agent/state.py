@@ -33,6 +33,13 @@ class AgentState(TypedDict):
     employee_fijo indica si employee_id vino fijado por la URL (chat de un
     empleado especifico): en ese caso el agente nunca debe preguntar por
     otro empleado ni llamar seleccionar_empleado.
+    ultimas_opciones: opciones de seleccion rapida (botones) para el widget
+    de chat, dejadas por la ultima tool de listado (empleados, servicios u
+    horas) que corrio en el turno actual. graph.py solo las usa si una de
+    esas tools corrio en el turno actual (ver _extraer_opciones en
+    graph.py): no hay que preocuparse de "limpiarlas" aqui porque un turno
+    que no vuelve a llamar ninguna de esas tools simplemente no las expone,
+    aunque el valor persistido quede desactualizado en el checkpointer.
     """
 
     messages: Annotated[list[AnyMessage], add_messages]
@@ -41,3 +48,4 @@ class AgentState(TypedDict):
     employee_id: Annotated[Optional[str], _ultimo_valor]
     employee_fijo: Annotated[bool, _ultimo_valor]
     transferido: Annotated[bool, _ultimo_valor]
+    ultimas_opciones: Annotated[Optional[list[dict]], _ultimo_valor]

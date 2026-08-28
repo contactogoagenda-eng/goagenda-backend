@@ -27,6 +27,10 @@ alter table super_admins enable row level security;
 -- ---------------------------------------------------------------------
 alter table businesses alter column owner_id drop not null;
 alter table businesses add column if not exists blocked boolean not null default false;
+-- El super admin solo pone el name al crear el negocio (el dueño completa
+-- el whatsapp despues, desde /business-settings), asi que phone_number
+-- tampoco puede seguir siendo obligatorio.
+alter table businesses alter column phone_number drop not null;
 
 -- ---------------------------------------------------------------------
 -- invitation_codes: 6 caracteres (letras mayusculas + digitos). Un

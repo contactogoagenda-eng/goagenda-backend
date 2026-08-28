@@ -56,8 +56,16 @@ class ChatMessageInput(BaseModel):
     mensaje: str
 
 
+class ChatOption(BaseModel):
+    """Opcion de seleccion rapida (boton) para el widget de chat: el cliente toca en vez de escribir."""
+
+    label: str
+    value: str
+
+
 class ChatMessageResponse(BaseModel):
     respuesta: str
+    opciones: list[ChatOption] | None = None
 
 
 class ChatHistoryMessage(BaseModel):
@@ -112,8 +120,8 @@ def enviar_mensaje_chat(business_id: str, session_id: str, data: ChatMessageInpu
     if not _negocio_habilitado(business):
         return ChatMessageResponse(respuesta=MENSAJE_NEGOCIO_NO_DISPONIBLE)
 
-    respuesta = enviar_mensaje(business_id, session_id, data.mensaje)
-    return ChatMessageResponse(respuesta=respuesta)
+    respuesta, opciones = enviar_mensaje(business_id, session_id, data.mensaje)
+    return ChatMessageResponse(respuesta=respuesta, opciones=opciones)
 
 
 @router.get("/{business_id}/sessions/{session_id}/messages", response_model=ChatHistoryResponse)
@@ -161,8 +169,8 @@ def enviar_mensaje_chat_empleado(business_id: str, employee_id: str, session_id:
     if not _negocio_habilitado(business):
         return ChatMessageResponse(respuesta=MENSAJE_NEGOCIO_NO_DISPONIBLE)
 
-    respuesta = enviar_mensaje(business_id, session_id, data.mensaje, employee_id=employee_id)
-    return ChatMessageResponse(respuesta=respuesta)
+    respuesta, opciones = enviar_mensaje(business_id, session_id, data.mensaje, employee_id=employee_id)
+    return ChatMessageResponse(respuesta=respuesta, opciones=opciones)
 
 
 @router.get("/{business_id}/{employee_id}/sessions/{session_id}/messages", response_model=ChatHistoryResponse)
