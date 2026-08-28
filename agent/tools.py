@@ -327,6 +327,11 @@ def crear_cita(
     except Exception as e:
         print(f"No se pudo enviar la notificacion push: {e}")
 
+    if resultado:
+        from services.realtime import emitir_evento_cita
+
+        emitir_evento_cita("appointment.created", business_id, resultado[0]["id"])
+
     return {"cita_creada": resultado}
 
 
@@ -372,6 +377,10 @@ def cancelar_cita(
         )
     except Exception as e:
         print(f"No se pudo enviar la notificacion de cancelacion: {e}")
+
+    from services.realtime import emitir_evento_cita
+
+    emitir_evento_cita("appointment.cancelled", business_id, appointment_id)
 
     return {"resultado": resultado}
 
@@ -429,6 +438,10 @@ def reprogramar_cita(
         )
     except Exception as e:
         print(f"No se pudo enviar la notificacion de reprogramacion: {e}")
+
+    from services.realtime import emitir_evento_cita
+
+    emitir_evento_cita("appointment.updated", business_id, appointment_id)
 
     return {"cita_reprogramada": True, "nueva_fecha_hora": nueva_fecha_hora}
 

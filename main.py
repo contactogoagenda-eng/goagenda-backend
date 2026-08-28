@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -8,6 +10,7 @@ import os
 
 from services.auth import obtener_usuario_actual, verificar_dueno, requiere_api_key_interna
 from services.seed_super_admin import sembrar_super_admin_por_defecto
+from services.realtime import gestor_tiempo_real
 
 from routes.webhook import router as webhook_router
 from routes.chat_routes import router as chat_router
@@ -24,6 +27,7 @@ from routes.admin_routes import router as admin_router
 from routes.invitation_codes_routes import router as invitation_codes_router
 from routes.employees_routes import router as employees_router
 from routes.me_routes import router as me_router
+from routes.realtime_routes import router as realtime_router
 
 
 load_dotenv()
@@ -58,6 +62,7 @@ TAGS_METADATA = [
     {"name": "invitations", "description": "Codigos de invitacion de 6 caracteres: el dueño invita empleados, y cualquiera los valida para quedar ligado a un negocio."},
     {"name": "super-admin", "description": "Endpoints exclusivos del super admin: crear negocios, bloquearlos, y generar sus codigos de invitacion de dueño."},
     {"name": "whatsapp", "description": "Integracion saliente de WhatsApp (Meta Cloud API y el microservicio Baileys): recordatorios y confirmacion de citas. El bot conversacional ya no responde por aqui."},
+    {"name": "realtime", "description": "WebSocket de notificaciones de citas en tiempo real para el panel (ver README, seccion 'WebSocket de tiempo real'). No aparece en este /docs porque OpenAPI no documenta WebSockets."},
     {"name": "sistema", "description": "Endpoints generales del servicio."},
     {"name": "herramientas-internas", "description": "Endpoints de prueba/operacion protegidos con la api key interna (no para el frontend)."},
 ]
@@ -90,6 +95,18 @@ app.include_router(admin_router)
 app.include_router(invitation_codes_router)
 app.include_router(employees_router)
 app.include_router(me_router)
+app.include_router(realtime_router)
+
+
+@app.on_event("startup")
+async def _registrar_loop_tiempo_real() -> None:
+    """
+    Le da al gestor de conexiones WS una referencia al event loop principal,
+    para que `emitir_evento_cita` (llamado desde codigo sync que corre en el
+    threadpool, ej. agent/tools.py) pueda programar el envio ahi en vez de
+    intentar hacer await desde un hilo que no es el del loop.
+    """
+    gestor_tiempo_real.registrar_loop(asyncio.get_running_loop())
 
 
 @app.exception_handler(APIError)

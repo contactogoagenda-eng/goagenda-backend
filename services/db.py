@@ -208,6 +208,25 @@ def get_appointment_by_id_and_phone(appointment_id: str, client_phone: str):
     return None
 
 
+def get_appointment_full(appointment_id: str):
+    """
+    Trae una cita con los joins de servicio y empleado resueltos, en la
+    misma forma que devuelve GET /appointments. La usa
+    services/realtime.py para armar el payload de los eventos de citas en
+    tiempo real (WebSocket) sin importar por que via se creo/modifico la
+    cita. Retorna None si no existe.
+    """
+    response = (
+        supabase.table("appointments")
+        .select("*, services(name, price, duration_minutes), employees(name)")
+        .eq("id", appointment_id)
+        .execute()
+    )
+    if response.data:
+        return response.data[0]
+    return None
+
+
 def update_appointment_schedule(appointment_id: str, nueva_fecha_hora: str):
     """Actualiza la fecha/hora de una cita existente (reprogramacion)."""
     response = (

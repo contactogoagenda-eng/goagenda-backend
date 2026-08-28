@@ -103,4 +103,9 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
         employee_id=data.employee_id,
     )
 
+    if resultado:
+        from services.realtime import emitir_evento_cita
+
+        emitir_evento_cita("appointment.created", data.business_id, resultado[0]["id"])
+
     return {"cita_creada": resultado}

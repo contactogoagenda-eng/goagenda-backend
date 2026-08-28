@@ -97,6 +97,33 @@ El agente (`agent/`) identifica al cliente por su numero de WhatsApp/celular, nu
 
 **Nota:** el bot de IA conversacional ya no responde por WhatsApp. `POST /webhook` (Meta) y `POST /baileys/message` siguen activos pero ya no invocan al agente; WhatsApp queda solo para recordatorios salientes y la confirmacion automatica de citas agendadas en la web.
 
+## WebSocket de tiempo real
+
+`GET /ws/appointments?business_id=<id>` (protocolo `ws://`/`wss://`, no HTTP — por eso no aparece en `/docs`, OpenAPI no documenta WebSockets) empuja al panel un evento cada vez que una cita del negocio se crea, se actualiza o se cancela, sin importar el canal de origen (agente de IA, creacion manual desde el panel, o confirmacion via WhatsApp/webhook de Supabase). Lo consume el frontend Angular para la campana de notificaciones del header (con sonido) y para recargar el calendario de citas automaticamente.
+
+**Autenticacion** (no va en query string para no dejar el JWT en logs de proxies): tras conectar, el cliente debe mandar como primer mensaje un frame de texto JSON `{"type": "auth", "token": "<jwt de Supabase Auth>"}` — el mismo token que ya usa como `Authorization: Bearer` en las llamadas REST. El servidor responde cerrando la conexion si algo falla, con un codigo de cierre WS custom (rango `4000-4999`, reservado para uso de la aplicacion):
+
+| Codigo de cierre | Motivo |
+|---|---|
+| `4400` | El primer mensaje no es JSON valido |
+| `4401` | Token invalido/expirado, o no llego `token` |
+| `4403` | El usuario del token no tiene acceso a `business_id` (ni es el dueño ni un empleado activo — misma regla que `verificar_acceso_negocio`) |
+| `4408` | No llego ningun mensaje en los primeros 10 segundos tras conectar |
+
+Una vez autenticado, el servidor no espera nada mas del cliente (cualquier mensaje adicional se ignora; solo se sigue escuchando para detectar la desconexion) y empuja un mensaje JSON por evento:
+
+```json
+{
+  "type": "appointment.created",
+  "business_id": "…",
+  "appointment": { "...": "mismo shape que cada fila de GET /appointments (incluye services y employees resueltos por join)" }
+}
+```
+
+`type` es `"appointment.created"`, `"appointment.updated"` (reprogramada) o `"appointment.cancelled"`. Implementacion: `services/realtime.py` (el gestor de conexiones, en memoria por proceso — no hay pub/sub entre instancias, ver limitacion abajo) y `routes/realtime_routes.py` (el endpoint); se dispara desde `agent/tools.py` (`crear_cita`/`cancelar_cita`/`reprogramar_cita`), `routes/manual_appointments.py` y `routes/webhook.py` (`/notify-web-booking` y `/supabase-webhook`).
+
+**Limitacion conocida:** las conexiones se guardan en memoria del proceso de FastAPI. Si el backend corre con mas de un worker/instancia (Railway con >1 replica, por ejemplo), un panel conectado al worker A no se entera de una cita creada por una request que cayo en el worker B. Mientras el backend corra como una sola instancia esto no es un problema; si se escala horizontalmente, esta capa necesitaria moverse a un pub/sub compartido (ej. Postgres `LISTEN/NOTIFY`, o Redis).
+
 ## Variables de entorno
 
 Ver `.env.example` para la lista completa con descripciones. Resumen:
@@ -120,8 +147,8 @@ Ver `.env.example` para la lista completa con descripciones. Resumen:
 main.py               # arranque de FastAPI, registro de routers, scheduler de recordatorios
 core/                  # configuracion compartida (settings del agente de chat)
 agent/                 # agente conversacional de LangGraph: estado, tools, prompt, grafo
-routes/                # un router por recurso (chat, webhook, negocios, servicios, horarios, etc)
-services/               # logica de negocio: Supabase, WhatsApp, Baileys, push, uso de IA, scheduling
+routes/                # un router por recurso (chat, webhook, negocios, servicios, horarios, realtime, etc)
+services/               # logica de negocio: Supabase, WhatsApp, Baileys, push, realtime (WS), uso de IA, scheduling
 ```
 
 Para una guia mas detallada de la arquitectura (flujo del agente, aislamiento por negocio, modelo de auth, etc), ver `CLAUDE.md`.

@@ -128,7 +128,11 @@ def notify_web_booking(data: NotifyWebBookingInput):
             )
         except Exception as e:
             print("Error enviando push notification desde web:", e)
-        
+
+    from services.realtime import emitir_evento_cita
+
+    emitir_evento_cita("appointment.created", data.business_id, data.appointment_id)
+
     return {"status": "ok", "message": "Notificacion enviada y cita confirmada"}
 
 from typing import Any, Dict
@@ -180,5 +184,9 @@ def supabase_webhook(payload: SupabaseWebhookPayload):
             )
         except Exception as e:
             print("Error enviando push notification desde supabase webhook:", e)
-        
+
+    from services.realtime import emitir_evento_cita
+
+    emitir_evento_cita("appointment.created", record["business_id"], record["id"])
+
     return {"status": "ok", "message": "Notificacion enviada desde supabase webhook"}
