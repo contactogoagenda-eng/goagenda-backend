@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+firebase-credentials.json
+
+venv/
+__pycache__/
+*.pyc
+
+.git/
+.github/
+
+.DS_Store
+.vscode/
+.idea/
+
+node_modules/
