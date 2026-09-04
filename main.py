@@ -13,7 +13,7 @@ from services.seed_super_admin import sembrar_super_admin_por_defecto
 from services.realtime import gestor_tiempo_real
 
 from routes.webhook import router as webhook_router
-from routes.chat_routes import router as chat_router
+from routes.chat_routes import router as chat_router, business_chat_router
 from routes.services_routes import router as services_router
 from routes.business_hours_routes import router as business_hours_router
 from routes.business_settings_routes import router as business_settings_router
@@ -84,6 +84,9 @@ app.include_router(webhook_router)
 # (ver routes/chat_routes.py). El enlace que el negocio comparte con sus
 # clientes es la unica "credencial".
 app.include_router(chat_router)
+# Vista autenticada del negocio sobre una conversacion escalada (ver
+# routes/chat_routes.py, seccion "Vista del negocio sobre una conversacion").
+app.include_router(business_chat_router)
 app.include_router(services_router)
 app.include_router(business_hours_router)
 app.include_router(business_settings_router)
@@ -198,6 +201,69 @@ def test_push(business_id: str):
         fecha_hora_texto="hoy a las 15:00",
     )
     return {"status": "Notificacion enviada (revisa tu celular)"}
+
+
+@app.post("/test-whatsapp-confirmation", tags=["herramientas-internas"], dependencies=[Depends(requiere_api_key_interna)])
+def test_whatsapp_confirmation(numero_whatsapp: str):
+    """
+    Prueba el envio de la confirmacion de cita por WhatsApp (numero
+    compartido de GoAgenda, ver services/whatsapp.py) a un numero real, sin
+    tener que agendar una cita de verdad. Util para verificar en caliente si
+    Meta esta aceptando el mensaje de texto libre o si hace falta un
+    message template (ver README, seccion "Notificaciones de WhatsApp al
+    cliente"). El numero se normaliza igual que en el chat/panel.
+    """
+    from services.whatsapp import enviar_confirmacion_cita_cliente, normalizar_numero_whatsapp
+
+    numero_normalizado = normalizar_numero_whatsapp(numero_whatsapp)
+    if not numero_normalizado:
+        return {"error": "Ese numero no parece un WhatsApp colombiano valido (celular de 10 digitos que empieza en 3)."}
+
+    resultado = enviar_confirmacion_cita_cliente(
+        client_phone=numero_normalizado,
+        nombre_cliente="Cliente de Prueba",
+        nombre_negocio="Negocio de Prueba",
+        nombre_servicio="Corte de cabello",
+        fecha_hora_texto="hoy a las 15:00",
+    )
+    return {"enviado_a": numero_normalizado, "resultado": resultado}
+
+
+@app.post("/test-whatsapp-reminder-template", tags=["herramientas-internas"], dependencies=[Depends(requiere_api_key_interna)])
+def test_whatsapp_reminder_template(business_id: str, numero_whatsapp: str):
+    """
+    Prueba el envio del recordatorio de cita como message template (ver
+    services/whatsapp.py:enviar_recordatorio_cita_template) a un numero
+    real, sin esperar a que el scheduler encuentre una cita real dentro de
+    su ventana de recordatorio. A diferencia de /test-whatsapp-confirmation,
+    este sale del numero propio del negocio (business_id), no del de
+    GoAgenda, asi que requiere que el negocio ya tenga whatsapp_phone_number_id
+    configurado.
+    """
+    from services.whatsapp import enviar_recordatorio_cita_template, normalizar_numero_whatsapp
+
+    numero_normalizado = normalizar_numero_whatsapp(numero_whatsapp)
+    if not numero_normalizado:
+        return {"error": "Ese numero no parece un WhatsApp colombiano valido (celular de 10 digitos que empieza en 3)."}
+
+    business_response = supabase.table("businesses").select("name, whatsapp_phone_number_id").eq("id", business_id).execute()
+    if not business_response.data:
+        return {"error": "Negocio no encontrado"}
+
+    business = business_response.data[0]
+    whatsapp_phone_number_id = business.get("whatsapp_phone_number_id")
+    if not whatsapp_phone_number_id:
+        return {"error": "Este negocio no tiene whatsapp_phone_number_id configurado (no tiene numero de Meta conectado)."}
+
+    resultado = enviar_recordatorio_cita_template(
+        to=numero_normalizado,
+        nombre_cliente="Cliente de Prueba",
+        nombre_negocio=business["name"],
+        nombre_servicio="Corte de cabello",
+        fecha_hora_texto="hoy a las 15:00",
+        business_phone_number_id=whatsapp_phone_number_id,
+    )
+    return {"enviado_a": numero_normalizado, "resultado": resultado}
 
 
 @app.post("/test-reminders", tags=["herramientas-internas"], dependencies=[Depends(requiere_api_key_interna)])

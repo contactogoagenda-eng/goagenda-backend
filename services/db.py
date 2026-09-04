@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -336,3 +337,40 @@ def set_employee_services(employee_id: str, service_ids: list[str]):
     if service_ids:
         filas = [{"employee_id": employee_id, "service_id": sid} for sid in service_ids]
         supabase.table("employee_services").insert(filas).execute()
+
+
+def registrar_mensaje_entrante_whatsapp(business_id: str, client_phone: str):
+    """
+    Registra que un cliente le escribio a un negocio, actualizando el
+    momento del ultimo mensaje entrante. Es lo que usa
+    cliente_dentro_de_ventana_24h para saber si un envio posterior (ej. un
+    recordatorio de cita) puede ir como texto libre o necesita un message
+    template aprobado por Meta.
+    """
+    ahora = datetime.now(timezone.utc).isoformat()
+    supabase.table("whatsapp_client_contacts").upsert(
+        {"business_id": business_id, "client_phone": client_phone, "last_inbound_at": ahora},
+        on_conflict="business_id,client_phone",
+    ).execute()
+
+
+def cliente_dentro_de_ventana_24h(business_id: str, client_phone: str) -> bool:
+    """
+    True si este cliente le escribio a este negocio en las ultimas 24
+    horas (la ventana de conversacion de Meta dentro de la cual se puede
+    mandar texto libre); False si nunca ha escrito o si paso mas de 24h,
+    en cuyo caso hace falta un message template aprobado.
+    """
+    response = (
+        supabase.table("whatsapp_client_contacts")
+        .select("last_inbound_at")
+        .eq("business_id", business_id)
+        .eq("client_phone", client_phone)
+        .limit(1)
+        .execute()
+    )
+    if not response.data or not response.data[0].get("last_inbound_at"):
+        return False
+
+    last_inbound_at = datetime.fromisoformat(response.data[0]["last_inbound_at"])
+    return datetime.now(timezone.utc) - last_inbound_at < timedelta(hours=24)

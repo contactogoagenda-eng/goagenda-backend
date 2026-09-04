@@ -3,7 +3,7 @@
 .env.*
 !.env.example
 firebase-credentials.json
-
+    
 # Entorno virtual de Python
 venv/
 __pycache__/

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
-from services.db import supabase
-from services.whatsapp import send_whatsapp_message
+from services.db import supabase, cliente_dentro_de_ventana_24h
+from services.whatsapp import send_whatsapp_message, enviar_recordatorio_cita_template
 from services.baileys_client import send_baileys_message
 from services.scheduling import formatear_fecha_natural
 
@@ -60,11 +60,25 @@ def revisar_y_enviar_recordatorios():
                 )
 
                 if whatsapp_phone_number_id:
-                    resultado_envio = send_whatsapp_message(
-                        to=cita["client_phone"],
-                        text=mensaje,
-                        business_phone_number_id=whatsapp_phone_number_id,
-                    )
+                    # Si el cliente nunca le ha escrito a este numero (o ya
+                    # paso mas de 24h desde su ultimo mensaje), un mensaje de
+                    # texto libre lo rechaza Meta: hay que usar un message
+                    # template aprobado en su lugar.
+                    if cliente_dentro_de_ventana_24h(business_id, cita["client_phone"]):
+                        resultado_envio = send_whatsapp_message(
+                            to=cita["client_phone"],
+                            text=mensaje,
+                            business_phone_number_id=whatsapp_phone_number_id,
+                        )
+                    else:
+                        resultado_envio = enviar_recordatorio_cita_template(
+                            to=cita["client_phone"],
+                            nombre_cliente=nombre_cliente,
+                            nombre_negocio=nombre_negocio,
+                            nombre_servicio=nombre_servicio,
+                            fecha_hora_texto=formatear_fecha_natural(fecha_cita),
+                            business_phone_number_id=whatsapp_phone_number_id,
+                        )
                 else:
                     resultado_envio = send_baileys_message(
                         business_id=business_id,

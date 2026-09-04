@@ -31,10 +31,13 @@ def _inicializar_firebase():
     return _firebase_app
 
 
-def _enviar_push(fcm_token: str, titulo: str, cuerpo: str):
+def _enviar_push(fcm_token: str, titulo: str, cuerpo: str, data: dict[str, str] | None = None):
     """
     Funcion generica que envia una notificacion push al dispositivo del negocio.
     Si fcm_token es None o vacio, no hace nada (el negocio no ha registrado su dispositivo aun).
+    `data` es un payload adicional de pares texto-texto (ej. business_id/session_id
+    para armar un deep link) que la app puede leer al tocar la notificacion;
+    FCM lo soporta aparte de title/body, antes sin usar en este archivo.
     """
     if not fcm_token:
         print("No hay fcm_token registrado para este negocio, no se envia notificacion.")
@@ -56,6 +59,7 @@ def _enviar_push(fcm_token: str, titulo: str, cuerpo: str):
                     image=LOGO_URL,
                 ),
             ),
+            data=data,
             token=fcm_token,
         )
 
@@ -91,4 +95,20 @@ def enviar_notificacion_cita_reprogramada(
         fcm_token,
         titulo="Cita reprogramada",
         cuerpo=f"{nombre_cliente} movió su cita de {servicio} del {fecha_anterior_texto} al {fecha_nueva_texto}",
+    )
+
+
+def enviar_notificacion_escalamiento(fcm_token: str, nombre_cliente: str, business_id: str, session_id: str):
+    """
+    Notifica al negocio que un cliente necesita atencion humana en el chat
+    (el bot no entendio pese a intentar aclarar, o el cliente pidio
+    explicitamente hablar con una persona). El payload `data` lleva
+    business_id/session_id para que la app arme el link directo a esa
+    conversacion (ver agent/tools.py:_notificar_negocio_escalamiento).
+    """
+    _enviar_push(
+        fcm_token,
+        titulo="Un cliente necesita ayuda",
+        cuerpo=f"{nombre_cliente} esta esperando que alguien del equipo siga la conversacion.",
+        data={"tipo": "chat_escalado", "business_id": business_id, "session_id": session_id},
     )

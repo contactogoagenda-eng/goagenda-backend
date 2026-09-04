@@ -1,12 +1,14 @@
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from agent.graph import MENSAJE_NEGOCIO_NO_DISPONIBLE, enviar_mensaje, obtener_historial
+from agent.graph import MENSAJE_NEGOCIO_NO_DISPONIBLE, enviar_mensaje, enviar_respuesta_humana, obtener_historial
+from services.auth import obtener_usuario_actual, verificar_acceso_negocio
 from services.db import get_business_by_id, get_employee_by_id
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+business_chat_router = APIRouter(prefix="/business/{business_id}/chat-sessions", tags=["chat"])
 
 
 def _obtener_negocio_o_404(business_id: str) -> dict:
@@ -178,5 +180,38 @@ def obtener_historial_chat_empleado(business_id: str, employee_id: str, session_
     _obtener_negocio_o_404(business_id)
     _obtener_empleado_o_404(business_id, employee_id)
     session_id = _validar_session_id(session_id)
+    historial = obtener_historial(business_id, session_id)
+    return ChatHistoryResponse(session_id=session_id, mensajes=historial)
+
+
+# ---------------------------------------------------------------------
+# Vista del negocio sobre una conversacion (autenticado): a diferencia de
+# las rutas publicas de arriba (pensadas para el propio widget, que ya
+# conoce y controla su session_id), estas exigen ser dueño o empleado
+# activo del negocio, para poder leer y responder una conversacion desde
+# el panel cuando el bot escalo (agent/tools.py:escalar_por_confusion /
+# transferir_a_equipo).
+# ---------------------------------------------------------------------
+
+
+class ReplyInput(BaseModel):
+    mensaje: str
+
+
+@business_chat_router.get("/{session_id}", response_model=ChatHistoryResponse)
+def obtener_conversacion_negocio(business_id: str, session_id: str, user_id: str = Depends(obtener_usuario_actual)):
+    verificar_acceso_negocio(business_id, user_id)
+    session_id = _validar_session_id(session_id)
+    historial = obtener_historial(business_id, session_id)
+    return ChatHistoryResponse(session_id=session_id, mensajes=historial)
+
+
+@business_chat_router.post("/{session_id}/reply", response_model=ChatHistoryResponse)
+def responder_conversacion_negocio(
+    business_id: str, session_id: str, data: ReplyInput, user_id: str = Depends(obtener_usuario_actual)
+):
+    verificar_acceso_negocio(business_id, user_id)
+    session_id = _validar_session_id(session_id)
+    enviar_respuesta_humana(business_id, session_id, data.mensaje)
     historial = obtener_historial(business_id, session_id)
     return ChatHistoryResponse(session_id=session_id, mensajes=historial)

@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
 
-from services.db import get_services, create_appointment, get_employee_by_id, supabase
-from services.scheduling import es_hora_valida, hay_choque_de_horario
+from services.db import get_services, create_appointment, get_business_by_id, get_employee_by_id, supabase
+from services.scheduling import es_hora_valida, hay_choque_de_horario, formatear_fecha_natural, generar_horas_disponibles
 from services.auth import obtener_usuario_actual, verificar_acceso_empleado, verificar_dueno
+from services.whatsapp import enviar_confirmacion_cita_cliente, normalizar_numero_whatsapp
 
 router = APIRouter(tags=["appointments"])
 
@@ -52,6 +53,46 @@ def listar_citas(
 
     response = query.order("scheduled_at", desc=False).range(offset, offset + limit - 1).execute()
     return {"appointments": response.data, "total": response.count, "limit": limit, "offset": offset}
+
+
+@router.get("/appointments/available-slots")
+def turnos_disponibles(
+    business_id: str,
+    employee_id: str,
+    date: str,
+    service_id: str | None = None,
+    user_id: str = Depends(obtener_usuario_actual),
+):
+    """
+    Calcula los horarios libres de un empleado en un dia dado, a partir del
+    horario configurado, el almuerzo, las citas ya confirmadas y la
+    duracion del servicio (o 30 min por defecto si no se pasa service_id).
+    Reutiliza la misma logica que usa el agente de IA para ofrecer horas.
+    """
+    verificar_dueno(business_id, user_id)
+
+    try:
+        datetime.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fecha invalida")
+
+    duracion_minutos = 30
+    if service_id:
+        servicios = get_services(business_id)
+        servicio = next((s for s in servicios if s["id"] == service_id), None)
+        if not servicio:
+            raise HTTPException(status_code=404, detail="Servicio no encontrado")
+        duracion_minutos = servicio.get("duration_minutes", 30)
+
+    available_slots = generar_horas_disponibles(business_id, employee_id, date, duracion_minutos)
+
+    return {
+        "business_id": business_id,
+        "employee_id": employee_id,
+        "date": date,
+        "duration_minutes": duracion_minutos,
+        "available_slots": available_slots,
+    }
 
 
 class CrearCitaManualInput(BaseModel):
@@ -107,5 +148,23 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
         from services.realtime import emitir_evento_cita
 
         emitir_evento_cita("appointment.created", data.business_id, resultado[0]["id"])
+
+    # El formulario del panel no obliga a que client_phone sea un WhatsApp
+    # (a veces es un cliente presencial sin WhatsApp), asi que la
+    # confirmacion se manda solo si el numero normaliza a un celular
+    # colombiano valido; si no, simplemente no se envia (no bloquea la cita).
+    numero_whatsapp = normalizar_numero_whatsapp(data.client_phone)
+    if numero_whatsapp:
+        try:
+            business = get_business_by_id(data.business_id)
+            enviar_confirmacion_cita_cliente(
+                client_phone=numero_whatsapp,
+                nombre_cliente=data.client_name,
+                nombre_negocio=business.get("name", "el negocio") if business else "el negocio",
+                nombre_servicio=servicio["name"],
+                fecha_hora_texto=formatear_fecha_natural(fecha_hora_dt),
+            )
+        except Exception as e:
+            print(f"No se pudo enviar la confirmacion de cita por WhatsApp al cliente: {e}")
 
     return {"cita_creada": resultado}

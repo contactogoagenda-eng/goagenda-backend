@@ -2,7 +2,7 @@ import os
 from fastapi import APIRouter, Request, Query
 from dotenv import load_dotenv
 
-from services.db import get_business_by_whatsapp_phone_id
+from services.db import get_business_by_whatsapp_phone_id, registrar_mensaje_entrante_whatsapp
 
 load_dotenv()
 
@@ -63,6 +63,11 @@ async def receive_message(request: Request):
         message = value["messages"][0]
         from_number = message["from"]
         text = message.get("text", {}).get("body", "")
+
+        # Cualquier mensaje entrante (texto o no) abre/renueva la ventana de
+        # 24h de Meta con este cliente, que es lo que decide si un envio
+        # posterior (ej. el recordatorio de cita) puede ir como texto libre.
+        registrar_mensaje_entrante_whatsapp(business_id, from_number)
 
         if not text:
             print("Mensaje sin texto (audio/imagen/sticker), se ignora por ahora.")

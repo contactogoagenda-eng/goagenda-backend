@@ -16,7 +16,10 @@ from services.db import (
     get_employees,
     get_employee_by_id,
     get_employee_services,
+    get_business_by_id,
 )
+from services.push_notifications import enviar_notificacion_escalamiento
+from services.realtime import gestor_tiempo_real
 from services.scheduling import (
     DIAS_SEMANA_ES,
     DIAS_MAP,
@@ -25,8 +28,10 @@ from services.scheduling import (
     generar_horas_disponibles,
     obtener_horario_dia,
 )
+from services.whatsapp import normalizar_numero_whatsapp
 
 BusinessId = Annotated[str, InjectedState("business_id")]
+SessionId = Annotated[str, InjectedState("session_id")]
 ClientPhone = Annotated[Optional[str], InjectedState("client_phone")]
 EmployeeId = Annotated[Optional[str], InjectedState("employee_id")]
 
@@ -44,25 +49,56 @@ def _formato_precio_cop(precio) -> str:
         return "$0"
 
 
+def _notificar_negocio_escalamiento(business_id: str, session_id: str, nombre_cliente: str) -> None:
+    """
+    Avisa al negocio que un cliente necesita que un humano siga la
+    conversacion (el bot no entendio, o el cliente lo pidio
+    explicitamente). Manda push (si el negocio tiene fcm_token) y un
+    evento en tiempo real por el WebSocket del panel (si hay una pestaña
+    conectada) — cualquiera de los dos que llegue le da al dueño el link
+    a esta conversacion (business_id + session_id).
+    """
+    business = get_business_by_id(business_id)
+    fcm_token = business.get("fcm_token") if business else None
+    if fcm_token:
+        enviar_notificacion_escalamiento(fcm_token, nombre_cliente, business_id, session_id)
+
+    gestor_tiempo_real.emitir(
+        business_id,
+        {
+            "type": "chat.escalated",
+            "business_id": business_id,
+            "session_id": session_id,
+            "client_name": nombre_cliente,
+        },
+    )
+
+
 @tool
 def registrar_telefono_cliente(
-    telefono: Annotated[str, Field(description="Numero de WhatsApp o celular que dio el cliente, en cualquier formato.")],
+    numero_whatsapp: Annotated[str, Field(description="Numero de WhatsApp que dio el cliente, en cualquier formato (con o sin indicativo +57).")],
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
-    Guarda el numero de WhatsApp/celular del cliente para poder identificarlo
-    en consultas, cancelaciones, reprogramaciones o para agendar una cita
-    nueva. Es la UNICA forma de identificar al cliente: nunca pidas cedula
-    ni ningun otro documento. Usa esta tool apenas el cliente te de su
-    numero, antes de intentar cualquier otra accion que lo requiera.
+    Guarda el numero de WhatsApp del cliente para poder identificarlo en
+    consultas, cancelaciones, reprogramaciones o para agendar una cita
+    nueva, y para poder enviarle la confirmacion de la cita por WhatsApp.
+    Es la UNICA forma de identificar al cliente: nunca pidas cedula ni
+    ningun otro documento, ni un telefono fijo — tiene que ser un numero
+    de WhatsApp. Usa esta tool apenas el cliente te de su numero, antes de
+    intentar cualquier otra accion que lo requiera.
     """
-    limpio = "".join(c for c in telefono if c.isdigit())
-    if len(limpio) < 7:
+    numero_normalizado = normalizar_numero_whatsapp(numero_whatsapp)
+
+    if numero_normalizado is None:
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        content="Ese numero no parece valido. Pidele al cliente que lo escriba de nuevo, con indicativo si es posible.",
+                        content=(
+                            "Ese numero no parece un WhatsApp colombiano valido (celular de 10 digitos que empieza "
+                            "en 3, con o sin el indicativo 57 adelante). Pidele al cliente que lo escriba de nuevo."
+                        ),
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -71,9 +107,11 @@ def registrar_telefono_cliente(
 
     return Command(
         update={
-            "client_phone": limpio,
+            "client_phone": numero_normalizado,
             "messages": [
-                ToolMessage(content=f"Numero de cliente registrado: {limpio}", tool_call_id=tool_call_id)
+                ToolMessage(
+                    content=f"Numero de WhatsApp del cliente registrado: {numero_normalizado}", tool_call_id=tool_call_id
+                )
             ],
         }
     )
@@ -210,6 +248,48 @@ def consultar_servicios_disponibles(
 
 
 @tool
+def seleccionar_servicio(
+    service_id: Annotated[str, Field(description="El id del servicio elegido (de consultar_servicios_disponibles).")],
+    business_id: BusinessId,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """
+    Confirma con que servicio va a ser la cita, en cuanto identifiques
+    cual quiere el cliente (por nombre exacto o boton de seleccion
+    rapida). Llamala INMEDIATAMENTE despues de resolver el service_id
+    (en el mismo turno en que llames consultar_servicios_disponibles si
+    hace falta para encontrarlo) — evita que se le vuelva a mostrar al
+    cliente la lista completa de servicios como si tuviera que elegir de
+    nuevo, aunque despues vuelvas a consultar el precio/duracion.
+    """
+    servicios = get_services(business_id)
+    servicio = next((s for s in servicios if s["id"] == service_id), None)
+    if not servicio or not servicio.get("active"):
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content="Ese servicio no existe o ya no esta activo.", tool_call_id=tool_call_id)
+                ]
+            }
+        )
+
+    return Command(
+        update={
+            "service_id": service_id,
+            "messages": [
+                ToolMessage(
+                    content=(
+                        f"Servicio seleccionado: {servicio['name']} "
+                        f"({servicio['duration_minutes']} min, {_formato_precio_cop(servicio['price'])})"
+                    ),
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        }
+    )
+
+
+@tool
 def consultar_horas_disponibles(
     fecha: Annotated[str, Field(description="Fecha en formato YYYY-MM-DD (la hora se ignora, usa 00:00:00).")],
     business_id: BusinessId,
@@ -273,6 +353,31 @@ def consultar_horas_disponibles(
 
 
 @tool
+def pedir_confirmacion_cita(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+    """
+    Llamala en el MISMO turno en que le muestras al cliente el resumen de
+    la cita y le preguntas "¿Confirmo tu cita?" (justo antes de llamar
+    crear_cita). Le ofrece botones de seleccion rapida Si/No en el
+    widget, para que no tenga que escribirlo a mano.
+    """
+    return Command(
+        update={
+            "ultimas_opciones": [
+                {"label": "Si, confirmar", "value": "Si"},
+                {"label": "No, cambiar algo", "value": "No"},
+            ],
+            "messages": [
+                ToolMessage(
+                    content="Opciones de confirmacion (Si/No) mostradas al cliente.",
+                    name="pedir_confirmacion_cita",
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        }
+    )
+
+
+@tool
 def crear_cita(
     servicio_nombre: Annotated[str, Field(description="Nombre exacto del servicio a agendar.")],
     fecha_hora: Annotated[str, Field(description="Fecha y hora en formato ISO 8601, ej: 2026-06-22T15:00:00")],
@@ -283,7 +388,7 @@ def crear_cita(
 ) -> dict:
     """Crea una cita nueva para el cliente, validando horario y disponibilidad del empleado seleccionado."""
     if not client_phone:
-        return {"error": "Antes de agendar necesito el numero de WhatsApp o celular del cliente. Pidelo y usa registrar_telefono_cliente."}
+        return {"error": "Antes de agendar necesito el numero de WhatsApp del cliente. Pidelo y usa registrar_telefono_cliente."}
     if not employee_id:
         return {"error": "Antes de agendar necesito saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
 
@@ -327,6 +432,22 @@ def crear_cita(
     except Exception as e:
         print(f"No se pudo enviar la notificacion push: {e}")
 
+    try:
+        from services.db import get_business_by_id
+        from services.scheduling import formatear_fecha_natural
+        from services.whatsapp import enviar_confirmacion_cita_cliente
+
+        business = get_business_by_id(business_id)
+        enviar_confirmacion_cita_cliente(
+            client_phone=client_phone,
+            nombre_cliente=nombre_cliente,
+            nombre_negocio=business.get("name", "el negocio") if business else "el negocio",
+            nombre_servicio=servicio["name"],
+            fecha_hora_texto=formatear_fecha_natural(fecha_hora_dt),
+        )
+    except Exception as e:
+        print(f"No se pudo enviar la confirmacion de cita por WhatsApp al cliente: {e}")
+
     if resultado:
         from services.realtime import emitir_evento_cita
 
@@ -339,7 +460,7 @@ def crear_cita(
 def consultar_citas_cliente(business_id: BusinessId, client_phone: ClientPhone) -> dict:
     """Consulta las citas confirmadas del cliente actual."""
     if not client_phone:
-        return {"error": "Necesito el numero de WhatsApp o celular del cliente para buscar sus citas. Pidelo y usa registrar_telefono_cliente."}
+        return {"error": "Necesito el numero de WhatsApp del cliente para buscar sus citas. Pidelo y usa registrar_telefono_cliente."}
     return {"citas": get_client_appointments(business_id, client_phone)}
 
 
@@ -351,7 +472,7 @@ def cancelar_cita(
 ) -> dict:
     """Cancela una cita existente del cliente."""
     if not client_phone:
-        return {"error": "Necesito el numero de WhatsApp o celular del cliente para poder cancelar. Pidelo y usa registrar_telefono_cliente."}
+        return {"error": "Necesito el numero de WhatsApp del cliente para poder cancelar. Pidelo y usa registrar_telefono_cliente."}
 
     cita = get_appointment_by_id_and_phone(appointment_id, client_phone)
     if not cita:
@@ -398,7 +519,7 @@ def reprogramar_cita(
     reagendar una cita que ya tiene, en vez de cancelarla y crear una nueva.
     """
     if not client_phone:
-        return {"error": "Necesito el numero de WhatsApp o celular del cliente para reprogramar. Pidelo y usa registrar_telefono_cliente."}
+        return {"error": "Necesito el numero de WhatsApp del cliente para reprogramar. Pidelo y usa registrar_telefono_cliente."}
 
     cita_actual = get_appointment_by_id_and_phone(appointment_id, client_phone)
     if not cita_actual:
@@ -447,7 +568,12 @@ def reprogramar_cita(
 
 
 @tool
-def transferir_a_equipo(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+def transferir_a_equipo(
+    business_id: BusinessId,
+    session_id: SessionId,
+    client_phone: ClientPhone,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
     """
     Usa esta tool INMEDIATAMENTE cuando el cliente pida explicitamente
     hablar con una persona real, con el equipo, con el dueño del negocio, o
@@ -455,6 +581,8 @@ def transferir_a_equipo(tool_call_id: Annotated[str, InjectedToolCallId]) -> Com
     conversacion (no solo al inicio). Esto detiene al bot para que un
     humano tome la conversacion.
     """
+    _notificar_negocio_escalamiento(business_id, session_id, client_phone or "Un cliente")
+
     return Command(
         update={
             "transferido": True,
@@ -465,15 +593,49 @@ def transferir_a_equipo(tool_call_id: Annotated[str, InjectedToolCallId]) -> Com
     )
 
 
+@tool
+def escalar_por_confusion(
+    business_id: BusinessId,
+    session_id: SessionId,
+    client_phone: ClientPhone,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """
+    Usa esta tool cuando, despues de intentar aclarar la solicitud del
+    cliente al menos una vez con una pregunta directa, sigues sin entender
+    que necesita, o cuando ninguna de tus otras herramientas te permite
+    ayudarlo con lo que pide. Avisa al negocio para que un humano siga la
+    conversacion (el cliente NUNCA se entera de este aviso: no le
+    menciones que vas a notificar a nadie ni le ofrezcas hablar con una
+    persona). NO la uses en la primera pregunta ambigua (primero intenta
+    aclarar tu mismo), ni la repitas si el estado de la conversacion
+    indica que ya se notifico antes, a menos que el cliente pida
+    explicitamente hablar con alguien (en ese caso usa transferir_a_equipo).
+    """
+    _notificar_negocio_escalamiento(business_id, session_id, client_phone or "Un cliente")
+
+    mensaje = "Dejame confirmar eso con el equipo, en un momento seguimos por aqui mismo 🙏"
+
+    return Command(
+        update={
+            "escalado": True,
+            "messages": [ToolMessage(content=mensaje, tool_call_id=tool_call_id)],
+        }
+    )
+
+
 TOOLS = [
     registrar_telefono_cliente,
     consultar_empleados_disponibles,
     seleccionar_empleado,
     consultar_servicios_disponibles,
+    seleccionar_servicio,
     consultar_horas_disponibles,
+    pedir_confirmacion_cita,
     crear_cita,
     consultar_citas_cliente,
     cancelar_cita,
     reprogramar_cita,
     transferir_a_equipo,
+    escalar_por_confusion,
 ]

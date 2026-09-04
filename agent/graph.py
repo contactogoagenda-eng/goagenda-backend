@@ -1,3 +1,5 @@
+import time
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -14,6 +16,7 @@ from core.settings import CHAT_MODEL_NAME, DATABASE_URL, OPENAI_API_KEY
 from services.ai_usage_tracking import registrar_uso
 from services.db import get_business_by_id, get_employees, get_employee_services, supabase as client_supabase
 from services.scheduling import DIAS_SEMANA_ES, ahora_local
+from services.whatsapp import construir_mensaje_contacto_humano
 
 MENSAJE_TRANSFERIDO = (
     "¡Perfecto! 🙌 En un momento una persona de nuestro equipo te atiende.\n\n"
@@ -30,6 +33,8 @@ MENSAJE_NEGOCIO_NO_DISPONIBLE = (
 )
 
 RECURSION_LIMIT = 12
+LLM_MAX_INTENTOS = 3
+LLM_ESPERA_ENTRE_INTENTOS_SEGUNDOS = 1.5
 
 # Tools cuyo resultado el widget de chat puede ofrecer como botones de
 # seleccion rapida (el cliente toca en vez de escribir).
@@ -37,6 +42,7 @@ _TOOLS_CON_OPCIONES = {
     "consultar_empleados_disponibles",
     "consultar_servicios_disponibles",
     "consultar_horas_disponibles",
+    "pedir_confirmacion_cita",
 }
 
 # Pool y checkpointer se crean una sola vez al importar el modulo (mismo
@@ -131,14 +137,30 @@ def _agent_node(state: AgentState) -> dict:
         empleados,
         state.get("employee_id"),
         state.get("employee_fijo", False),
+        state.get("service_id"),
+        state.get("escalado", False),
     )
 
     historial = _historial_valido_para_modelo(state["messages"])
-    try:
-        response = _model.invoke([SystemMessage(content=system)] + historial)
-    except Exception as e:
-        print(f"Error invocando al modelo de IA: {e}")
-        return {"messages": [AIMessage(content=MENSAJE_ERROR_TECNICO)]}
+
+    # Reintenta hasta LLM_MAX_INTENTOS veces antes de rendirse: la falla
+    # observada en produccion (un solo intento fallido justo despues de
+    # que el cliente dio su nombre y numero) se resolvio sola al repetir
+    # el mismo mensaje segundos despues, señal de que era transitoria
+    # (timeout/hiccup de red), no un error real de la solicitud.
+    response = None
+    for intento in range(1, LLM_MAX_INTENTOS + 1):
+        try:
+            response = _model.invoke([SystemMessage(content=system)] + historial)
+            break
+        except Exception as e:
+            print(f"Error invocando al modelo de IA (intento {intento}/{LLM_MAX_INTENTOS}): {e}")
+            if intento < LLM_MAX_INTENTOS:
+                time.sleep(LLM_ESPERA_ENTRE_INTENTOS_SEGUNDOS)
+
+    if response is None:
+        mensaje = MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(business)
+        return {"messages": [AIMessage(content=mensaje)]}
 
     usage = getattr(response, "usage_metadata", None) or {}
     if usage:
@@ -175,17 +197,33 @@ def _thread_config(business_id: str, session_id: str) -> dict:
     }
 
 
-def _extraer_opciones(mensajes_nuevos: list, ultimas_opciones: list[dict] | None) -> list[dict] | None:
+def _extraer_opciones(
+    mensajes_nuevos: list, ultimas_opciones: list[dict] | None, service_id: str | None, employee_id: str | None
+) -> list[dict] | None:
     """
     Opciones de seleccion rapida (botones) para el widget de chat, solo si
     la ULTIMA tool ejecutada en este turno fue una de listado (empleados,
     servicios u horas). Si el turno no llamo ninguna, o la ultima fue otra
     (ej. seleccionar_empleado despues de listar, o crear_cita), no se
     muestran botones — evita ofrecer opciones "viejas" que ya no aplican.
+
+    Ademas, si el cliente ya confirmo un servicio/empleado (service_id o
+    employee_id ya en el estado), nunca se vuelven a mostrar los botones
+    de esa lista, aunque el bot vuelva a llamar la tool de listado en ese
+    mismo turno (ej. para confirmar precio/duracion antes de agendar) —
+    sin esto, cualquier re-consulta hacia el final del flujo hacia
+    reaparecer el selector completo como si el cliente tuviera que volver
+    a elegir.
     """
     for mensaje in reversed(mensajes_nuevos):
         if isinstance(mensaje, ToolMessage):
-            return ultimas_opciones or None if mensaje.name in _TOOLS_CON_OPCIONES else None
+            if mensaje.name not in _TOOLS_CON_OPCIONES:
+                return None
+            if mensaje.name == "consultar_servicios_disponibles" and service_id:
+                return None
+            if mensaje.name == "consultar_empleados_disponibles" and employee_id:
+                return None
+            return ultimas_opciones or None
     return None
 
 
@@ -200,26 +238,62 @@ def enviar_mensaje(
     modelo no intente cambiarlo.
     """
     config = _thread_config(business_id, session_id)
-    entrada = {"messages": [HumanMessage(content=mensaje)], "business_id": business_id}
+    snapshot_previo = GRAPH.get_state(config)
+    mensajes_previos = len(snapshot_previo.values.get("messages", [])) if snapshot_previo and snapshot_previo.values else 0
+
+    entrada = {"messages": [HumanMessage(content=mensaje)], "business_id": business_id, "session_id": session_id}
     if employee_id:
         entrada["employee_id"] = employee_id
         entrada["employee_fijo"] = True
 
-    snapshot_previo = GRAPH.get_state(config)
-    mensajes_previos = len(snapshot_previo.values.get("messages", [])) if snapshot_previo and snapshot_previo.values else 0
+    if not snapshot_previo or not snapshot_previo.values:
+        # Primer turno de este thread: varias tools (transferir_a_equipo,
+        # escalar_por_confusion, crear_cita, consultar_servicios_disponibles,
+        # etc.) leen client_phone/employee_id via InjectedState, que lanza
+        # KeyError si esa clave nunca se escribio en el estado - ej. el
+        # cliente pide hablar con un asesor antes de dar su numero, o
+        # pregunta por servicios antes de elegir empleado en el chat
+        # general. setdefault no pisa el employee_id real si ya se puso
+        # arriba (chat de un empleado fijo).
+        entrada.setdefault("client_phone", None)
+        entrada.setdefault("employee_id", None)
 
     try:
         resultado = GRAPH.invoke(entrada, config=config)
     except GraphRecursionError:
-        return MENSAJE_LIMITE_RONDAS, None
+        business = get_business_by_id(business_id)
+        return MENSAJE_LIMITE_RONDAS + "\n\n" + construir_mensaje_contacto_humano(business), None
+    except Exception as e:
+        # Cualquier excepcion no prevista dentro del grafo (bug en una tool,
+        # timeout de base de datos, etc.) se escapa hasta aqui sin que nada
+        # la haya capturado antes: sin este catch-all el endpoint de chat
+        # respondia un 500 crudo y el widget quedaba roto.
+        print(f"Error inesperado invocando el grafo del agente: {e}")
+        business = get_business_by_id(business_id)
+        return MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(business), None
 
     mensajes_nuevos = resultado["messages"][mensajes_previos:]
-    opciones = _extraer_opciones(mensajes_nuevos, resultado.get("ultimas_opciones"))
+    opciones = _extraer_opciones(
+        mensajes_nuevos, resultado.get("ultimas_opciones"), resultado.get("service_id"), resultado.get("employee_id")
+    )
 
     for mensaje_respuesta in reversed(resultado["messages"]):
         if isinstance(mensaje_respuesta, AIMessage) and mensaje_respuesta.content:
             return mensaje_respuesta.content, opciones
     return MENSAJE_ERROR_TECNICO, None
+
+
+def enviar_respuesta_humana(business_id: str, session_id: str, mensaje: str) -> None:
+    """
+    Escribe la respuesta manual de un dueño/empleado directo en el
+    checkpointer de esa conversacion, como si fuera un mensaje del
+    asistente, sin invocar el modelo. Tambien marca transferido=True: a
+    partir de aqui el bot deja de responder en esta conversacion (mismo
+    mecanismo que ya usa transferir_a_equipo), para que el bot y el
+    humano no le contesten al cliente al mismo tiempo.
+    """
+    config = _thread_config(business_id, session_id)
+    GRAPH.update_state(config, {"messages": [AIMessage(content=mensaje)], "transferido": True})
 
 
 def obtener_historial(business_id: str, session_id: str) -> list[dict]:
