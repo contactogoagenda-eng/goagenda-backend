@@ -51,6 +51,19 @@ def _formato_precio_cop(precio) -> str:
         return "$0"
 
 
+def _formato_telefono_visible(client_phone: str | None) -> str:
+    """
+    client_phone en el estado ya viene normalizado con indicativo de pais
+    (ej. 573001234567, lo que necesita la API de WhatsApp para enviar
+    mensajes) - para mostrarselo AL CLIENTE en un resumen, se le quita el
+    indicativo para que se vea como el mismo lo escribio originalmente
+    (ej. 3001234567), en vez de un formato que nunca tecleo.
+    """
+    if client_phone and client_phone.startswith("57") and len(client_phone) == 12:
+        return client_phone[2:]
+    return client_phone or ""
+
+
 def _notificar_negocio_escalamiento(business_id: str, session_id: str, nombre_cliente: str) -> None:
     """
     Avisa al negocio que un cliente necesita que un humano siga la
@@ -395,15 +408,15 @@ def pedir_confirmacion_cita(
         fecha_texto = fecha_hora
 
     lineas = [
-        "¡Perfecto! Confirmame estos datos por favor 📋",
+        "¡Perfecto! Confírmame estos datos por favor 📋",
         f"💇 Servicio: *{servicio_nombre}*{precio_texto}",
     ]
     if mostrar_empleado:
         lineas.append(f"🧑 Con: *{empleado.get('name') or 'el equipo'}*")
-    lineas.append(f"📅 Cuando: *{fecha_texto}*")
+    lineas.append(f"📅 Cuándo: *{fecha_texto}*")
     lineas.append(f"👤 Nombre: *{nombre_cliente}*")
     if client_phone:
-        lineas.append(f"📱 Numero: *{client_phone}*")
+        lineas.append(f"📱 Número: *{_formato_telefono_visible(client_phone)}*")
     lineas.append("¿Confirmo tu cita?")
 
     return Command(
