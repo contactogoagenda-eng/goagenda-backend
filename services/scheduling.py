@@ -110,11 +110,17 @@ def generar_horas_disponibles(business_id: str, employee_id: str, fecha_str: str
             candidato += timedelta(minutes=30)
             continue
 
-        # Excluir horario de almuerzo
+        # Excluir horario de almuerzo: compara el rango completo del turno
+        # candidato contra el almuerzo, no solo su hora de inicio - si solo
+        # se revisara el inicio, un turno que empieza justo antes del
+        # almuerzo pero se extiende dentro de el (segun la duracion del
+        # servicio) se ofrecia igual, aunque terminara chocando con el
+        # descanso del empleado.
         en_almuerzo = False
         if lunch_start and lunch_end:
-            hora_str = candidato.strftime("%H:%M:%S")
-            if lunch_start <= hora_str < lunch_end:
+            lunch_inicio_dt = datetime.combine(fecha_dt.date(), datetime.strptime(lunch_start, "%H:%M:%S").time())
+            lunch_fin_dt = datetime.combine(fecha_dt.date(), datetime.strptime(lunch_end, "%H:%M:%S").time())
+            if candidato < lunch_fin_dt and fin_candidato > lunch_inicio_dt:
                 en_almuerzo = True
 
         # Excluir si choca con alguna cita existente
@@ -128,7 +134,7 @@ def generar_horas_disponibles(business_id: str, employee_id: str, fecha_str: str
     return horas_libres
 
 
-def es_hora_valida(fecha_hora_str: str, employee_id: str) -> tuple[bool, str]:
+def es_hora_valida(fecha_hora_str: str, employee_id: str, duracion_minutos: int = 30) -> tuple[bool, str]:
     try:
         fecha_hora = datetime.fromisoformat(fecha_hora_str)
     except ValueError:
@@ -148,11 +154,16 @@ def es_hora_valida(fecha_hora_str: str, employee_id: str) -> tuple[bool, str]:
     lunch_end = horario_dia.get("lunch_end")
 
     hora_str = fecha_hora.strftime("%H:%M:%S")
+    fecha_hora_fin = fecha_hora + timedelta(minutes=duracion_minutos)
+    hora_fin_str = fecha_hora_fin.strftime("%H:%M:%S")
 
-    if hora_str < opening or hora_str >= closing:
+    if hora_str < opening or hora_fin_str > closing:
         return False, f"Esa hora esta fuera del horario de atencion ({opening[:5]} a {closing[:5]}) para los {DIAS_SEMANA_ES[dia_codigo]}."
 
-    if lunch_start and lunch_end and lunch_start <= hora_str < lunch_end:
+    # Compara el rango completo de la cita (inicio + duracion) contra el
+    # almuerzo, no solo la hora de inicio - una cita que empieza antes del
+    # almuerzo pero termina durante el tambien debe rechazarse.
+    if lunch_start and lunch_end and hora_str < lunch_end and hora_fin_str > lunch_start:
         return False, f"Esa hora cae en el horario de almuerzo ({lunch_start[:5]} a {lunch_end[:5]}). Por favor elige otra hora."
 
     return True, ""

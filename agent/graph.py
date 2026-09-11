@@ -296,17 +296,41 @@ def enviar_respuesta_humana(business_id: str, session_id: str, mensaje: str) -> 
     GRAPH.update_state(config, {"messages": [AIMessage(content=mensaje)], "transferido": True})
 
 
-def obtener_historial(business_id: str, session_id: str) -> list[dict]:
-    """Lee el historial persistido de una sesion (solo turnos humano/IA, sin tool calls)."""
+def obtener_historial(business_id: str, session_id: str) -> tuple[list[dict], list[dict] | None]:
+    """
+    Lee el historial persistido de una sesion (solo turnos humano/IA, sin
+    tool calls), y si el ultimo mensaje es una respuesta del asistente,
+    tambien recupera las opciones de seleccion rapida de ESE turno (si
+    aplican) para que el widget pueda restaurarlas despues de un recargue
+    de pagina (ej. el navegador recarga la pestaña al volver de segundo
+    plano) - sin esto, las opciones se perdian porque son efimeras y solo
+    viajaban en la respuesta directa de enviar_mensaje.
+    """
     config = _thread_config(business_id, session_id)
     snapshot = GRAPH.get_state(config)
     if not snapshot or not snapshot.values:
-        return []
+        return [], None
 
+    mensajes = snapshot.values.get("messages", [])
     historial = []
-    for mensaje in snapshot.values.get("messages", []):
+    for mensaje in mensajes:
         if isinstance(mensaje, HumanMessage) and mensaje.content:
             historial.append({"role": "user", "content": mensaje.content})
         elif isinstance(mensaje, AIMessage) and mensaje.content:
             historial.append({"role": "assistant", "content": mensaje.content})
-    return historial
+
+    opciones = None
+    if historial and historial[-1]["role"] == "assistant":
+        ultimo_turno = []
+        for mensaje in reversed(mensajes):
+            ultimo_turno.insert(0, mensaje)
+            if isinstance(mensaje, HumanMessage):
+                break
+        opciones = _extraer_opciones(
+            ultimo_turno,
+            snapshot.values.get("ultimas_opciones"),
+            snapshot.values.get("service_id"),
+            snapshot.values.get("employee_id"),
+        )
+
+    return historial, opciones

@@ -27,6 +27,7 @@ from services.scheduling import (
     hay_choque_de_horario,
     generar_horas_disponibles,
     obtener_horario_dia,
+    formatear_fecha_natural,
 )
 from services.whatsapp import normalizar_numero_whatsapp
 
@@ -353,13 +354,52 @@ def consultar_horas_disponibles(
 
 
 @tool
-def pedir_confirmacion_cita(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+def pedir_confirmacion_cita(
+    servicio_nombre: Annotated[str, Field(description="Nombre exacto del servicio a agendar.")],
+    fecha_hora: Annotated[str, Field(description="Fecha y hora en formato ISO 8601, ej: 2026-06-22T15:00:00")],
+    nombre_cliente: Annotated[str, Field(description="Nombre del cliente.")],
+    business_id: BusinessId,
+    employee_id: EmployeeId,
+    client_phone: ClientPhone,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
     """
-    Llamala en el MISMO turno en que le muestras al cliente el resumen de
-    la cita y le preguntas "¿Confirmo tu cita?" (justo antes de llamar
-    crear_cita). Le ofrece botones de seleccion rapida Si/No en el
-    widget, para que no tenga que escribirlo a mano.
+    Llama esta tool SIEMPRE que vayas a pedirle confirmacion al cliente
+    antes de agendar (la primera vez, y de nuevo cada vez que el cliente
+    corrija algun dato) - arma el resumen formateado de la cita Y le
+    ofrece los botones de seleccion rapida Si/No, en un solo paso. NUNCA
+    escribas tu mismo el resumen de confirmacion: esta tool es la UNICA
+    forma de mostrarlo, relaya su resultado tal cual en tu respuesta (no
+    lo repitas ni lo reformules). No llames crear_cita en este mismo
+    turno — eso solo pasa despues de que el cliente confirme, en un
+    mensaje aparte.
     """
+    servicios = get_employee_services(employee_id) if employee_id else []
+    servicio = next((s for s in servicios if s["name"].lower() == servicio_nombre.lower()), None)
+    precio_texto = f" · {_formato_precio_cop(servicio['price'])}" if servicio else ""
+
+    empleados_negocio = get_employees(business_id)
+    empleado = get_employee_by_id(employee_id) if employee_id else None
+    mostrar_empleado = bool(empleado) and len(empleados_negocio) > 1
+
+    try:
+        fecha_hora_dt = datetime.fromisoformat(fecha_hora)
+        fecha_texto = formatear_fecha_natural(fecha_hora_dt)
+    except ValueError:
+        fecha_texto = fecha_hora
+
+    lineas = [
+        "¡Perfecto! Confirmame estos datos por favor 📋",
+        f"💇 Servicio: *{servicio_nombre}*{precio_texto}",
+    ]
+    if mostrar_empleado:
+        lineas.append(f"🧑 Con: *{empleado.get('name') or 'el equipo'}*")
+    lineas.append(f"📅 Cuando: *{fecha_texto}*")
+    lineas.append(f"👤 Nombre: *{nombre_cliente}*")
+    if client_phone:
+        lineas.append(f"📱 Numero: *{client_phone}*")
+    lineas.append("¿Confirmo tu cita?")
+
     return Command(
         update={
             "ultimas_opciones": [
@@ -367,11 +407,7 @@ def pedir_confirmacion_cita(tool_call_id: Annotated[str, InjectedToolCallId]) ->
                 {"label": "No, cambiar algo", "value": "No"},
             ],
             "messages": [
-                ToolMessage(
-                    content="Opciones de confirmacion (Si/No) mostradas al cliente.",
-                    name="pedir_confirmacion_cita",
-                    tool_call_id=tool_call_id,
-                )
+                ToolMessage(content="\n".join(lineas), name="pedir_confirmacion_cita", tool_call_id=tool_call_id)
             ],
         }
     )
@@ -392,17 +428,18 @@ def crear_cita(
     if not employee_id:
         return {"error": "Antes de agendar necesito saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
 
-    es_valida, mensaje_error = es_hora_valida(fecha_hora, employee_id)
-    if not es_valida:
-        return {"error": mensaje_error}
-
     servicios = get_employee_services(employee_id)
     servicio = next((s for s in servicios if s["name"].lower() == servicio_nombre.lower()), None)
     if not servicio:
         return {"error": f"No encontre el servicio '{servicio_nombre}' para ese empleado. Servicios disponibles: {[s['name'] for s in servicios]}"}
 
-    fecha_hora_dt = datetime.fromisoformat(fecha_hora)
     duracion = servicio.get("duration_minutes", 30)
+
+    es_valida, mensaje_error = es_hora_valida(fecha_hora, employee_id, duracion)
+    if not es_valida:
+        return {"error": mensaje_error}
+
+    fecha_hora_dt = datetime.fromisoformat(fecha_hora)
 
     hay_choque, mensaje_choque = hay_choque_de_horario(business_id, employee_id, fecha_hora_dt, duracion)
     if hay_choque:
@@ -530,7 +567,7 @@ def reprogramar_cita(
     duracion = cita_actual.get("services", {}).get("duration_minutes", 30) if cita_actual.get("services") else 30
     nombre_servicio = cita_actual.get("services", {}).get("name", "tu cita") if cita_actual.get("services") else "tu cita"
 
-    es_valida, mensaje_error = es_hora_valida(nueva_fecha_hora, empleado_id_cita)
+    es_valida, mensaje_error = es_hora_valida(nueva_fecha_hora, empleado_id_cita, duracion)
     if not es_valida:
         return {"error": mensaje_error}
 

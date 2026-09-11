@@ -119,17 +119,18 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
     if not empleado or empleado["business_id"] != data.business_id or not empleado.get("active"):
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
 
-    es_valida, mensaje_error = es_hora_valida(data.fecha_hora, data.employee_id)
-    if not es_valida:
-        raise HTTPException(status_code=400, detail=mensaje_error)
-
     servicios = get_services(data.business_id)
     servicio = next((s for s in servicios if s["id"] == data.service_id), None)
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
 
-    fecha_hora_dt = datetime.fromisoformat(data.fecha_hora)
     duracion = servicio.get("duration_minutes", 30)
+
+    es_valida, mensaje_error = es_hora_valida(data.fecha_hora, data.employee_id, duracion)
+    if not es_valida:
+        raise HTTPException(status_code=400, detail=mensaje_error)
+
+    fecha_hora_dt = datetime.fromisoformat(data.fecha_hora)
 
     hay_choque, mensaje_choque = hay_choque_de_horario(data.business_id, data.employee_id, fecha_hora_dt, duracion)
     if hay_choque:

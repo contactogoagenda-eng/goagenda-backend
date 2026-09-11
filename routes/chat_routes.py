@@ -78,6 +78,7 @@ class ChatHistoryMessage(BaseModel):
 class ChatHistoryResponse(BaseModel):
     session_id: str
     mensajes: list[ChatHistoryMessage]
+    opciones: list[ChatOption] | None = None
 
 
 @router.get("/{business_id}/config", response_model=ChatConfigResponse)
@@ -131,8 +132,8 @@ def obtener_historial_chat(business_id: str, session_id: str):
     """Historial de una sesion (para recargar el chat si el cliente refresca la pagina)."""
     _obtener_negocio_o_404(business_id)
     session_id = _validar_session_id(session_id)
-    historial = obtener_historial(business_id, session_id)
-    return ChatHistoryResponse(session_id=session_id, mensajes=historial)
+    historial, opciones = obtener_historial(business_id, session_id)
+    return ChatHistoryResponse(session_id=session_id, mensajes=historial, opciones=opciones)
 
 
 # ---------------------------------------------------------------------
@@ -180,8 +181,8 @@ def obtener_historial_chat_empleado(business_id: str, employee_id: str, session_
     _obtener_negocio_o_404(business_id)
     _obtener_empleado_o_404(business_id, employee_id)
     session_id = _validar_session_id(session_id)
-    historial = obtener_historial(business_id, session_id)
-    return ChatHistoryResponse(session_id=session_id, mensajes=historial)
+    historial, opciones = obtener_historial(business_id, session_id)
+    return ChatHistoryResponse(session_id=session_id, mensajes=historial, opciones=opciones)
 
 
 # ---------------------------------------------------------------------
@@ -202,7 +203,7 @@ class ReplyInput(BaseModel):
 def obtener_conversacion_negocio(business_id: str, session_id: str, user_id: str = Depends(obtener_usuario_actual)):
     verificar_acceso_negocio(business_id, user_id)
     session_id = _validar_session_id(session_id)
-    historial = obtener_historial(business_id, session_id)
+    historial, _ = obtener_historial(business_id, session_id)
     return ChatHistoryResponse(session_id=session_id, mensajes=historial)
 
 
@@ -213,5 +214,5 @@ def responder_conversacion_negocio(
     verificar_acceso_negocio(business_id, user_id)
     session_id = _validar_session_id(session_id)
     enviar_respuesta_humana(business_id, session_id, data.mensaje)
-    historial = obtener_historial(business_id, session_id)
+    historial, _ = obtener_historial(business_id, session_id)
     return ChatHistoryResponse(session_id=session_id, mensajes=historial)
