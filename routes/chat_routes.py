@@ -31,7 +31,16 @@ def _obtener_empleado_o_404(business_id: str, employee_id: str) -> dict:
 
 
 def _negocio_habilitado(business: dict) -> bool:
-    return business.get("plan", "basic") != "none" and not business.get("blocked")
+    # onboarding_completed usa default True: un negocio ya existente (creado
+    # antes de este flag, o si por algun motivo la columna no vino en el
+    # select) nunca debe perder su chat por accidente. Solo los negocios
+    # nuevos, que arrancan en False, quedan bloqueados hasta terminar el
+    # onboarding (ver routes/business_settings_routes.py:complete_onboarding).
+    return (
+        business.get("plan", "basic") != "none"
+        and not business.get("blocked")
+        and business.get("onboarding_completed", True)
+    )
 
 
 def _validar_session_id(session_id: str) -> str:

@@ -87,3 +87,71 @@ def update_reminder_config(data: ReminderConfigUpdate, user_id: str = Depends(ob
     if not response.data:
         raise HTTPException(status_code=404, detail="Negocio no encontrado")
     return {"business": response.data[0]}
+
+
+class OnboardingStepUpdate(BaseModel):
+    business_id: str
+    step: int
+
+
+@router.put("/business-settings/onboarding-step")
+def update_onboarding_step(data: OnboardingStepUpdate, user_id: str = Depends(obtener_usuario_actual)):
+    """Guarda en que paso del onboarding va el negocio, para poder retomarlo si cierra la sesion antes de terminar."""
+    verificar_dueno(data.business_id, user_id)
+    response = (
+        supabase.table("businesses")
+        .update({"onboarding_step": data.step})
+        .eq("id", data.business_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Negocio no encontrado")
+    return {"business": response.data[0]}
+
+
+class OnboardingCompleteInput(BaseModel):
+    business_id: str
+
+
+@router.post("/business-settings/onboarding/complete")
+def complete_onboarding(data: OnboardingCompleteInput, user_id: str = Depends(obtener_usuario_actual)):
+    """
+    Activa el negocio al terminar el onboarding: habilita el chat publico y
+    desbloquea el resto del panel. Valida server-side (no confia solo en el
+    estado del wizard en el frontend) que ya haya al menos un servicio
+    activo y al menos un dia de horario activo, igual que exigen los pasos
+    3 y 4 del wizard.
+    """
+    verificar_dueno(data.business_id, user_id)
+
+    tiene_servicio = (
+        supabase.table("services")
+        .select("id", count="exact")
+        .eq("business_id", data.business_id)
+        .eq("active", True)
+        .limit(1)
+        .execute()
+    )
+    if not tiene_servicio.data:
+        raise HTTPException(status_code=400, detail="Falta registrar al menos un servicio antes de activar el negocio")
+
+    tiene_horario = (
+        supabase.table("business_hours")
+        .select("id", count="exact")
+        .eq("business_id", data.business_id)
+        .eq("is_open", True)
+        .limit(1)
+        .execute()
+    )
+    if not tiene_horario.data:
+        raise HTTPException(status_code=400, detail="Falta activar al menos un dia de horario antes de activar el negocio")
+
+    response = (
+        supabase.table("businesses")
+        .update({"onboarding_completed": True})
+        .eq("id", data.business_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Negocio no encontrado")
+    return {"business": response.data[0]}
