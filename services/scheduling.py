@@ -140,6 +140,14 @@ def es_hora_valida(fecha_hora_str: str, employee_id: str, duracion_minutos: int 
     except ValueError:
         return False, "El formato de fecha y hora no es valido."
 
+    # Rechaza explicitamente cualquier fecha/hora ya pasada (bug QA: sin
+    # esto, una cita en el pasado solo fallaba mas adelante con un mensaje
+    # de "no hay horas disponibles" que no explicaba la causa real, y si
+    # alguna vez no hubiera choque con otra cita, se podia llegar a crear
+    # una cita en el pasado).
+    if fecha_hora < ahora_local():
+        return False, "Esa fecha y hora ya pasaron. Por favor elige una fecha y hora futuras."
+
     dias_map = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     dia_codigo = dias_map[fecha_hora.weekday()]
 

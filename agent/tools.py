@@ -23,6 +23,7 @@ from services.realtime import gestor_tiempo_real
 from services.scheduling import (
     DIAS_SEMANA_ES,
     DIAS_MAP,
+    ahora_local,
     es_hora_valida,
     hay_choque_de_horario,
     generar_horas_disponibles,
@@ -322,6 +323,11 @@ def consultar_horas_disponibles(
 
     fecha_iso = f"{fecha}T00:00:00"
     fecha_dt = datetime.fromisoformat(fecha_iso)
+
+    if fecha_dt.date() < ahora_local().date():
+        error = {"error": "Esa fecha ya paso. Elige una fecha de hoy en adelante."}
+        return Command(update={"messages": [ToolMessage(content=str(error), tool_call_id=tool_call_id)]})
+
     dias_map = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     dia_codigo = dias_map[fecha_dt.weekday()]
     horario_dia = obtener_horario_dia(employee_id, dia_codigo)
