@@ -1,4 +1,5 @@
 import os
+import secrets
 
 from fastapi import Depends, Header, HTTPException
 from dotenv import load_dotenv
@@ -151,5 +152,5 @@ def requiere_api_key_interna(x_api_key: str = Header(default=None)):
     Dependencia para endpoints server-to-server (baileys-service) y de
     prueba/administracion: exige el header x-api-key con la key interna.
     """
-    if not INTERNAL_API_KEY or x_api_key != INTERNAL_API_KEY:
+    if not INTERNAL_API_KEY or not x_api_key or not secrets.compare_digest(x_api_key, INTERNAL_API_KEY):
         raise HTTPException(status_code=401, detail="API key invalida o faltante")

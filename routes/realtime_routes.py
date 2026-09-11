@@ -45,7 +45,7 @@ async def ws_appointments(websocket: WebSocket, business_id: str):
     llamado desde `agent/tools.py`, `routes/manual_appointments.py` y
     `routes/webhook.py`).
     """
-    await gestor_tiempo_real.conectar(business_id, websocket)
+    await gestor_tiempo_real.aceptar(websocket)
 
     try:
         try:
@@ -72,6 +72,10 @@ async def ws_appointments(websocket: WebSocket, business_id: str):
         except HTTPException:
             await websocket.close(code=4403)
             return
+
+        # Solo hasta aqui, con el token validado y el acceso al negocio
+        # confirmado, se une la conexion al grupo que recibe sus eventos.
+        gestor_tiempo_real.registrar(business_id, websocket)
 
         while True:
             await websocket.receive_text()

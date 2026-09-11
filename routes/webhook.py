@@ -1,14 +1,46 @@
+import hashlib
+import hmac
 import os
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
 from dotenv import load_dotenv
 
+from services.auth import requiere_api_key_interna
 from services.db import get_business_by_whatsapp_phone_id, registrar_mensaje_entrante_whatsapp
 
 load_dotenv()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+META_APP_SECRET = os.getenv("META_APP_SECRET")
 
 router = APIRouter(tags=["whatsapp"])
+
+
+def _verificar_firma_meta(body_bytes: bytes, firma_header: str | None):
+    """
+    Verifica que el payload del webhook realmente venga de Meta, comparando
+    la firma HMAC-SHA256 que Meta envia en el header X-Hub-Signature-256
+    (calculada con el App Secret) contra una firma calculada aqui mismo
+    sobre el cuerpo crudo de la request. Sin esto, cualquiera que adivine
+    el whatsapp_phone_number_id de un negocio puede forjar mensajes
+    entrantes falsos (incluida la frase que confirma citas automaticamente).
+
+    Si META_APP_SECRET todavia no esta configurado en el entorno, se deja
+    pasar sin verificar (igual que el comportamiento anterior) para no
+    romper instalaciones existentes que aun no lo hayan configurado, pero
+    queda un aviso claro en los logs de que el webhook esta desprotegido.
+    """
+    if not META_APP_SECRET:
+        print("ADVERTENCIA: META_APP_SECRET no esta configurado, el webhook de WhatsApp no verifica firma.")
+        return
+
+    if not firma_header or not firma_header.startswith("sha256="):
+        raise HTTPException(status_code=401, detail="Firma de webhook faltante o invalida")
+
+    firma_recibida = firma_header.split("=", 1)[1]
+    firma_calculada = hmac.new(META_APP_SECRET.encode(), body_bytes, hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(firma_recibida, firma_calculada):
+        raise HTTPException(status_code=401, detail="Firma de webhook faltante o invalida")
 
 
 @router.get("/webhook")
@@ -24,7 +56,7 @@ def verify_webhook(
 
 
 @router.post("/webhook")
-async def receive_message(request: Request):
+async def receive_message(request: Request, x_hub_signature_256: str = Header(default=None)):
     """
     Recibe los mensajes entrantes de WhatsApp de CUALQUIER negocio conectado.
     Identifica el negocio dinamicamente segun el phone_number_id que llega
@@ -37,6 +69,9 @@ async def receive_message(request: Request):
     confirma automaticamente una cita agendada en la web cuando el cliente
     escribe la frase de confirmacion por WhatsApp.
     """
+    raw_body = await request.body()
+    _verificar_firma_meta(raw_body, x_hub_signature_256)
+
     body = await request.json()
     print("Webhook recibido:", body)
 
@@ -96,7 +131,7 @@ class NotifyWebBookingInput(BaseModel):
     appointment_id: str
     business_id: str
 
-@router.post("/notify-web-booking")
+@router.post("/notify-web-booking", dependencies=[Depends(requiere_api_key_interna)])
 def notify_web_booking(data: NotifyWebBookingInput):
     from services.push_notifications import enviar_notificacion_nueva_cita
     
@@ -149,7 +184,7 @@ class SupabaseWebhookPayload(BaseModel):
     schema_name: str | None = None
     old_record: Any = None
 
-@router.post("/supabase-webhook")
+@router.post("/supabase-webhook", dependencies=[Depends(requiere_api_key_interna)])
 def supabase_webhook(payload: SupabaseWebhookPayload):
     from services.push_notifications import enviar_notificacion_nueva_cita
     

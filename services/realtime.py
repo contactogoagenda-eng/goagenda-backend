@@ -32,8 +32,20 @@ class GestorConexionesTiempoReal:
         """Llamado una vez en el evento `startup` de FastAPI (main.py)."""
         self._loop = loop
 
-    async def conectar(self, business_id: str, websocket: WebSocket) -> None:
+    async def aceptar(self, websocket: WebSocket) -> None:
+        """
+        Solo acepta el handshake del WebSocket, sin unirlo todavia al grupo
+        de difusion del negocio. Se separa de `registrar` para que el
+        cliente pueda enviar su primer mensaje (la autenticacion) antes de
+        empezar a recibir eventos de citas de ese negocio: si se uniera al
+        grupo antes de validar el token, una conexion aun no autenticada
+        podria recibir datos de clientes (nombre, telefono, servicio) si un
+        evento real llega durante la ventana de espera de la autenticacion.
+        """
         await websocket.accept()
+
+    def registrar(self, business_id: str, websocket: WebSocket) -> None:
+        """Une la conexion (ya aceptada y autenticada) al grupo de difusion del negocio."""
         self._conexiones.setdefault(business_id, set()).add(websocket)
 
     def desconectar(self, business_id: str, websocket: WebSocket) -> None:
