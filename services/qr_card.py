@@ -38,6 +38,20 @@ def _texto_centrado(draw: ImageDraw.ImageDraw, y: float, texto: str, fuente: Ima
     return bbox[3] - bbox[1]
 
 
+def _numero_visible(whatsapp: str) -> str:
+    """
+    El whatsapp del negocio se guarda con el indicativo de pais (57) porque
+    asi lo necesita el resto del sistema (enlaces wa.me, matching de
+    webhooks - ver services/whatsapp.py:normalizar_numero_whatsapp). En la
+    tarjeta impresa se muestra en formato local, como lo reconoce y marca
+    un cliente colombiano, sin el indicativo.
+    """
+    solo_digitos = "".join(c for c in whatsapp if c.isdigit())
+    if solo_digitos.startswith("57") and len(solo_digitos) == 12:
+        return solo_digitos[2:]
+    return whatsapp
+
+
 def _fuente_que_encaja(
     draw: ImageDraw.ImageDraw, texto: str, tam_inicial: int, tam_minimo: int, ancho_maximo: float
 ) -> ImageFont.FreeTypeFont:
@@ -111,7 +125,7 @@ def generar_tarjeta_qr(chat_link: str, nombre_negocio: str, whatsapp: str) -> by
     fuente_nombre = _fuente_que_encaja(draw, nombre_negocio, 56, 30, ancho_util)
     y += _texto_centrado(draw, y, nombre_negocio, fuente_nombre, CHARCOAL) + 45
 
-    texto_whats = f"WhatsApp: {whatsapp}"
+    texto_whats = f"WhatsApp: {_numero_visible(whatsapp)}"
     fuente_whats = _fuente_que_encaja(draw, texto_whats, 38, 24, ancho_util - 80)
     bbox = draw.textbbox((0, 0), texto_whats, font=fuente_whats)
     ancho_txt, alto_txt = bbox[2] - bbox[0], bbox[3] - bbox[1]
