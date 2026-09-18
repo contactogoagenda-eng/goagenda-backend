@@ -54,7 +54,7 @@ def update_fcm_token(data: FcmTokenUpdate, user_id: str = Depends(obtener_usuari
 
 class ReminderConfigUpdate(BaseModel):
     business_id: str
-    reminder_hours_before: int
+    reminder_hours_before: float
 
 
 @router.get("/business-settings")
