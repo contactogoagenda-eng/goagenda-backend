@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from services.db import supabase, cliente_dentro_de_ventana_24h
 from services.whatsapp import send_whatsapp_message, enviar_recordatorio_cita_template
 from services.baileys_client import send_baileys_message
-from services.scheduling import formatear_fecha_natural
+from services.scheduling import ahora_local, formatear_fecha_natural
 
 
 def revisar_y_enviar_recordatorios():
@@ -11,7 +11,9 @@ def revisar_y_enviar_recordatorios():
     cuyo momento de recordatorio ya llego (segun reminder_hours_before del negocio)
     y que aun no se les ha enviado el recordatorio, y lo manda por WhatsApp.
     """
-    ahora = datetime.now()
+    # scheduled_at se guarda en hora de Colombia (naive) y el servidor corre en
+    # UTC: comparar contra datetime.now() corria la ventana 5 horas.
+    ahora = ahora_local()
 
     # Trae todos los negocios con su configuracion de recordatorio
     negocios_response = supabase.table("businesses").select("id, name, reminder_hours_before, whatsapp_phone_number_id").execute()
