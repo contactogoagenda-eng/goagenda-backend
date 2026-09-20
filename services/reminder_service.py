@@ -20,6 +20,7 @@ def revisar_y_enviar_recordatorios():
     negocios = negocios_response.data
 
     total_enviados = 0
+    total_candidatas = 0
 
     for negocio in negocios:
         business_id = negocio["id"]
@@ -46,6 +47,8 @@ def revisar_y_enviar_recordatorios():
             .lte("scheduled_at", limite_superior.isoformat())
             .execute()
         )
+
+        total_candidatas += len(citas_response.data)
 
         for cita in citas_response.data:
             try:
@@ -100,6 +103,8 @@ def revisar_y_enviar_recordatorios():
 
             except Exception as e:
                 print(f"Error enviando recordatorio para cita {cita.get('id')}: {e}")
+
+    print(f"[recordatorios] ahora={ahora:%Y-%m-%d %H:%M} negocios={len(negocios)} citas_en_ventana={total_candidatas} enviados={total_enviados}")
 
     if total_enviados > 0:
         print(f"Revision de recordatorios completada. Enviados: {total_enviados}")
