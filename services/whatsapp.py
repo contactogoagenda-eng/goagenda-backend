@@ -189,21 +189,23 @@ def enviar_confirmacion_cita_cliente(client_phone: str, nombre_cliente: str, nom
     )
 
 
-def enviar_recordatorio_cita_template(
-    to: str, nombre_cliente: str, nombre_negocio: str, nombre_servicio: str, fecha_hora_texto: str, business_phone_number_id: str
-):
+def enviar_recordatorio_cita_template(to: str, nombre_cliente: str, nombre_negocio: str, nombre_servicio: str, fecha_hora_texto: str):
     """
-    Envia el recordatorio de cita como message template (WHATSAPP_REMINDER_TEMPLATE),
-    para cuando el cliente nunca le ha escrito al numero del negocio o ya
-    paso mas de 24h desde su ultimo mensaje. A diferencia de la
-    confirmacion (que sale del numero propio de GoAgenda), el recordatorio
-    sale del numero propio del negocio (business_phone_number_id), igual
-    que el envio de texto libre en services/reminder_service.py.
+    Envia el recordatorio de cita como message template (WHATSAPP_REMINDER_TEMPLATE)
+    desde el numero propio de GoAgenda, igual que la confirmacion, para todos
+    los negocios (multitenant): el nombre del negocio va como variable de la
+    plantilla, asi ningun negocio necesita tener su propio numero de Meta.
+    Siempre template y no texto libre, porque el cliente agenda por el chat
+    web y Meta rechaza texto libre fuera de la ventana de 24h.
     """
+    if not GOAGENDA_WHATSAPP_TOKEN or not GOAGENDA_WHATSAPP_PHONE_NUMBER_ID:
+        print("Faltan GOAGENDA_WHATSAPP_TOKEN/GOAGENDA_WHATSAPP_PHONE_NUMBER_ID, no se envia el recordatorio.")
+        return {"error": "credenciales de WhatsApp de GoAgenda no configuradas"}
+
     return _enviar_mensaje_template(
         to=to,
-        phone_number_id=business_phone_number_id,
-        token=WHATSAPP_TOKEN,
+        phone_number_id=GOAGENDA_WHATSAPP_PHONE_NUMBER_ID,
+        token=GOAGENDA_WHATSAPP_TOKEN,
         template_name=WHATSAPP_REMINDER_TEMPLATE,
         language_code=WHATSAPP_REMINDER_TEMPLATE_LANG,
         parametros_body=[nombre_cliente, nombre_negocio, nombre_servicio, fecha_hora_texto],

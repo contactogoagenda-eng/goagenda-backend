@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
-from services.db import supabase, cliente_dentro_de_ventana_24h
-from services.whatsapp import send_whatsapp_message, enviar_recordatorio_cita_template
-from services.baileys_client import send_baileys_message
+from services.db import supabase
+from services.whatsapp import enviar_recordatorio_cita_template
 from services.scheduling import ahora_local, formatear_fecha_natural
 
 
@@ -14,9 +13,10 @@ def revisar_y_enviar_recordatorios():
     # scheduled_at se guarda en hora de Colombia (naive) y el servidor corre en
     # UTC: comparar contra datetime.now() corria la ventana 5 horas.
     ahora = ahora_local()
+    print(f"[recordatorios] inicio ciclo ahora={ahora:%Y-%m-%d %H:%M}", flush=True)
 
     # Trae todos los negocios con su configuracion de recordatorio
-    negocios_response = supabase.table("businesses").select("id, name, reminder_hours_before, whatsapp_phone_number_id").execute()
+    negocios_response = supabase.table("businesses").select("id, name, reminder_hours_before").execute()
     negocios = negocios_response.data
 
     total_enviados = 0
@@ -26,27 +26,25 @@ def revisar_y_enviar_recordatorios():
         business_id = negocio["id"]
         nombre_negocio = negocio["name"]
         horas_antes = negocio.get("reminder_hours_before") or 24
-        whatsapp_phone_number_id = negocio.get("whatsapp_phone_number_id")
-
-        # Canal de envio: si el negocio tiene numero oficial de Meta se usa
-        # ese; si no, se intenta por Baileys (numero vinculado con codigo).
-        # Los negocios sin ninguno de los dos simplemente fallaran el envio
-        # y el recordatorio se reintentara en el siguiente ciclo.
 
         # Ventana: citas que caen entre AHORA y AHORA + horas_antes,
         # que aun no han recibido recordatorio, y siguen confirmadas.
         limite_superior = ahora + timedelta(hours=horas_antes)
 
-        citas_response = (
-            supabase.table("appointments")
-            .select("*, services(name)")
-            .eq("business_id", business_id)
-            .eq("status", "confirmed")
-            .eq("reminder_sent", False)
-            .gte("scheduled_at", ahora.isoformat())
-            .lte("scheduled_at", limite_superior.isoformat())
-            .execute()
-        )
+        try:
+            citas_response = (
+                supabase.table("appointments")
+                .select("*, services(name)")
+                .eq("business_id", business_id)
+                .eq("status", "confirmed")
+                .eq("reminder_sent", False)
+                .gte("scheduled_at", ahora.isoformat())
+                .lte("scheduled_at", limite_superior.isoformat())
+                .execute()
+            )
+        except Exception as e:
+            print(f"[recordatorios] error consultando citas de {nombre_negocio}: {e}", flush=True)
+            continue
 
         total_candidatas += len(citas_response.data)
 
@@ -56,40 +54,13 @@ def revisar_y_enviar_recordatorios():
                 nombre_cliente = cita.get("client_name") or "Cliente"
                 nombre_servicio = cita.get("services", {}).get("name", "tu cita") if cita.get("services") else "tu cita"
 
-                mensaje = (
-                    f"¡Hola, {nombre_cliente}! 👋\n\n"
-                    f"Te recordamos tu próxima cita en *{nombre_negocio}* 📅\n\n"
-                    f"✨ Servicio: *{nombre_servicio}*\n"
-                    f"🕐 Cuándo: *{formatear_fecha_natural(fecha_cita)}*\n\n"
-                    "¡Te esperamos! 😊"
+                resultado_envio = enviar_recordatorio_cita_template(
+                    to=cita["client_phone"],
+                    nombre_cliente=nombre_cliente,
+                    nombre_negocio=nombre_negocio,
+                    nombre_servicio=nombre_servicio,
+                    fecha_hora_texto=formatear_fecha_natural(fecha_cita),
                 )
-
-                if whatsapp_phone_number_id:
-                    # Si el cliente nunca le ha escrito a este numero (o ya
-                    # paso mas de 24h desde su ultimo mensaje), un mensaje de
-                    # texto libre lo rechaza Meta: hay que usar un message
-                    # template aprobado en su lugar.
-                    if cliente_dentro_de_ventana_24h(business_id, cita["client_phone"]):
-                        resultado_envio = send_whatsapp_message(
-                            to=cita["client_phone"],
-                            text=mensaje,
-                            business_phone_number_id=whatsapp_phone_number_id,
-                        )
-                    else:
-                        resultado_envio = enviar_recordatorio_cita_template(
-                            to=cita["client_phone"],
-                            nombre_cliente=nombre_cliente,
-                            nombre_negocio=nombre_negocio,
-                            nombre_servicio=nombre_servicio,
-                            fecha_hora_texto=formatear_fecha_natural(fecha_cita),
-                            business_phone_number_id=whatsapp_phone_number_id,
-                        )
-                else:
-                    resultado_envio = send_baileys_message(
-                        business_id=business_id,
-                        to=cita["client_phone"],
-                        text=mensaje,
-                    )
 
                 # Solo marcamos como enviado si WhatsApp confirmo el envio (sin campo "error")
                 if isinstance(resultado_envio, dict) and "error" in resultado_envio:

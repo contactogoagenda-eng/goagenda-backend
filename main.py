@@ -235,10 +235,8 @@ def test_whatsapp_reminder_template(business_id: str, numero_whatsapp: str):
     Prueba el envio del recordatorio de cita como message template (ver
     services/whatsapp.py:enviar_recordatorio_cita_template) a un numero
     real, sin esperar a que el scheduler encuentre una cita real dentro de
-    su ventana de recordatorio. A diferencia de /test-whatsapp-confirmation,
-    este sale del numero propio del negocio (business_id), no del de
-    GoAgenda, asi que requiere que el negocio ya tenga whatsapp_phone_number_id
-    configurado.
+    su ventana de recordatorio. Igual que la confirmacion, sale del numero
+    propio de GoAgenda; business_id solo aporta el nombre del negocio.
     """
     from services.whatsapp import enviar_recordatorio_cita_template, normalizar_numero_whatsapp
 
@@ -246,14 +244,11 @@ def test_whatsapp_reminder_template(business_id: str, numero_whatsapp: str):
     if not numero_normalizado:
         return {"error": "Ese numero no parece un WhatsApp colombiano valido (celular de 10 digitos que empieza en 3)."}
 
-    business_response = supabase.table("businesses").select("name, whatsapp_phone_number_id").eq("id", business_id).execute()
+    business_response = supabase.table("businesses").select("name").eq("id", business_id).execute()
     if not business_response.data:
         return {"error": "Negocio no encontrado"}
 
     business = business_response.data[0]
-    whatsapp_phone_number_id = business.get("whatsapp_phone_number_id")
-    if not whatsapp_phone_number_id:
-        return {"error": "Este negocio no tiene whatsapp_phone_number_id configurado (no tiene numero de Meta conectado)."}
 
     resultado = enviar_recordatorio_cita_template(
         to=numero_normalizado,
@@ -261,7 +256,6 @@ def test_whatsapp_reminder_template(business_id: str, numero_whatsapp: str):
         nombre_negocio=business["name"],
         nombre_servicio="Corte de cabello",
         fecha_hora_texto="hoy a las 15:00",
-        business_phone_number_id=whatsapp_phone_number_id,
     )
     return {"enviado_a": numero_normalizado, "resultado": resultado}
 
