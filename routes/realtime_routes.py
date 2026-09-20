@@ -51,12 +51,14 @@ async def ws_appointments(websocket: WebSocket, business_id: str):
         try:
             primer_mensaje = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         except asyncio.TimeoutError:
+            print(f"[ws] cierre 4408 (sin auth en 10s) business={business_id}", flush=True)
             await websocket.close(code=4408)
             return
 
         try:
             datos = json.loads(primer_mensaje)
         except ValueError:
+            print(f"[ws] cierre 4400 (JSON invalido) business={business_id}", flush=True)
             await websocket.close(code=4400)
             return
 
@@ -64,18 +66,22 @@ async def ws_appointments(websocket: WebSocket, business_id: str):
         user_id = _resolver_usuario(token)
 
         if not user_id:
+            print(f"[ws] cierre 4401 (token invalido) business={business_id}", flush=True)
             await websocket.close(code=4401)
             return
 
         try:
             verificar_acceso_negocio(business_id, user_id)
         except HTTPException:
+            print(f"[ws] cierre 4403 (sin acceso) business={business_id} user={user_id}", flush=True)
             await websocket.close(code=4403)
             return
 
         # Solo hasta aqui, con el token validado y el acceso al negocio
         # confirmado, se une la conexion al grupo que recibe sus eventos.
         gestor_tiempo_real.registrar(business_id, websocket)
+        print(f"[ws] autenticado business={business_id} user={user_id}", flush=True)
+        await websocket.send_text(json.dumps({"type": "auth_ok"}))
 
         while True:
             await websocket.receive_text()
