@@ -13,12 +13,14 @@ class ServiceCreate(BaseModel):
     name: str
     duration_minutes: int = 30
     price: float = 0
+    offers_home_visit: bool = False
 
 
 class ServiceUpdate(BaseModel):
     name: Optional[str] = None
     duration_minutes: Optional[int] = None
     price: Optional[float] = None
+    offers_home_visit: Optional[bool] = None
 
 
 def _business_id_de_servicio(service_id: str) -> str:
@@ -64,6 +66,7 @@ def create_service(data: ServiceCreate, user_id: str = Depends(obtener_usuario_a
                 "name": data.name,
                 "duration_minutes": data.duration_minutes,
                 "price": data.price,
+                "offers_home_visit": data.offers_home_visit,
                 "active": True,
             }
         )

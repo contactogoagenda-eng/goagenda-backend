@@ -1,3 +1,5 @@
+import re
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Optional
 
@@ -8,6 +10,7 @@ from langgraph.types import Command
 from pydantic import Field
 
 from services.db import (
+    get_home_visit_zones,
     get_services,
     create_appointment,
     get_client_appointments,
@@ -49,6 +52,116 @@ def _muestra_repartida(items: list[str], n: int) -> list[str]:
         return list(items)
     pasos = n - 1
     return [items[round(i * (len(items) - 1) / pasos)] for i in range(n)]
+
+
+def _domicilios_activos(business_id: str) -> bool:
+    """Flag del negocio: con los domicilios desactivados el chat se comporta como antes (solo en el local)."""
+    negocio = get_business_by_id(business_id)
+    return bool(negocio and negocio.get("home_visits_enabled"))
+
+
+def _validar_domicilio(business_id: str, servicio: dict | None, direccion: str | None, mensajes: list) -> str | None:
+    """
+    Valida una cita a domicilio (direccion presente). Devuelve un mensaje de
+    error, o None si esta bien. Solo se puede pedir domicilio en servicios que
+    lo permiten, y la direccion debe salir de lo que el cliente escribio: el
+    modelo llego a inventar datos (ej. un telefono) que el cliente nunca dio.
+    """
+    if not direccion or not direccion.strip():
+        return None
+    if not _domicilios_activos(business_id):
+        return "Este negocio no hace domicilios. La cita solo puede ser en el local; no vuelvas a ofrecer domicilio."
+    if servicio and not servicio.get("offers_home_visit"):
+        return "Ese servicio no se presta a domicilio. Ofrecele agendarlo en el local."
+
+    def _tokens(texto: str) -> set[str]:
+        return {t for t in re.findall(r"[a-z0-9áéíóúñ]+", texto.lower()) if len(t) >= 2}
+
+    texto_cliente = " ".join(str(m.content) for m in mensajes if getattr(m, "type", None) == "human")
+    tokens_direccion = _tokens(direccion)
+    if tokens_direccion and len(tokens_direccion & _tokens(texto_cliente)) / len(tokens_direccion) < 0.7:
+        return "El cliente todavia no ha dado esa direccion. NO la inventes: pidele la direccion completa donde debemos ir."
+    return None
+
+
+def _normalizar(texto: str) -> str:
+    """Minusculas y sin tildes, para comparar nombres de zonas con lo que escribio el cliente."""
+    sin_tildes = unicodedata.normalize("NFD", texto or "")
+    return "".join(c for c in sin_tildes if unicodedata.category(c) != "Mn").lower().strip()
+
+
+def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, mensajes: list) -> tuple[dict | None, str | None]:
+    """
+    Politica de domicilios del negocio: valida que el lugar del cliente este
+    dentro de las zonas donde se hacen domicilios y devuelve (zona, error).
+    - Sin zonas configuradas: domicilio libre, sin recargo (zona None, sin error).
+    - Con zonas: el nombre de una zona activa debe aparecer en lo que escribio
+      el cliente (direccion o mensajes); no se acepta una zona que solo dijo el modelo.
+    """
+    if not direccion or not direccion.strip():
+        return None, None
+
+    zonas = get_home_visit_zones(business_id)
+    if not zonas:
+        return None, None
+
+    texto_cliente = _normalizar(
+        direccion + " " + " ".join(str(m.content) for m in mensajes if getattr(m, "type", None) == "human")
+    )
+    listado = ", ".join(f"{z['name']} (recargo {_formato_precio_cop(z['fee'])})" for z in zonas)
+
+    if zona and zona.strip():
+        elegida = next((z for z in zonas if _normalizar(z["name"]) == _normalizar(zona)), None)
+        if not elegida:
+            return None, (
+                f"Ese lugar esta fuera de la zona de cobertura de domicilios. Zonas donde SI se llega: {listado}. "
+                "Explicaselo al cliente y ofrecele agendar en el local o en una de esas zonas."
+            )
+    else:
+        coincidencias = [z for z in zonas if _normalizar(z["name"]) in texto_cliente]
+        if not coincidencias:
+            return None, (
+                "No puedo confirmar si esa direccion esta dentro de la cobertura de domicilios. "
+                f"Pregunta al cliente en que municipio/zona esta. Zonas donde SI se llega: {listado}."
+            )
+        elegida = coincidencias[0]
+
+    if _normalizar(elegida["name"]) not in texto_cliente:
+        return None, (
+            "El cliente todavia no ha dicho en que municipio/zona esta. NO lo supongas: preguntaselo. "
+            f"Zonas donde SI se llega: {listado}."
+        )
+    return elegida, None
+
+
+_DIAS_MESES = (
+    r"lunes|martes|miercoles|jueves|viernes|sabado|domingo|"
+    r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre"
+)
+_PATRON_FECHA = re.compile(
+    rf"\b(hoy|manana|pasado manana|semana|{_DIAS_MESES})\b"  # palabras de fecha
+    r"|\b\d{4}-\d{2}-\d{2}\b"  # 2026-09-21
+    r"|\b\d{1,2}/\d{1,2}\b"  # 21/09
+    r"|\b(el|dia)\s+\d{1,2}\b"  # el 21, dia 21
+)
+
+
+def _cliente_dio_fecha(mensajes: list) -> bool:
+    """
+    True si en algun mensaje del cliente hay una referencia a una fecha (hoy,
+    mañana, un dia de la semana, un mes, "el 21", 21/09...). Guardia contra
+    alucinaciones: el modelo llego a elegir una fecha por su cuenta
+    (ej. "lunes 21") sin que el cliente la dijera. Las direcciones
+    ("calle 24 nro 15-18") no cuentan como fecha.
+    """
+    texto = _normalizar(" ".join(str(m.content) for m in mensajes if getattr(m, "type", None) == "human"))
+    return bool(_PATRON_FECHA.search(texto))
+
+
+MENSAJE_FALTA_FECHA = (
+    "El cliente todavia NO ha dicho para que dia quiere la cita. NO elijas ni supongas una fecha: "
+    "preguntale para que dia le gustaria (ej: hoy, mañana, o una fecha) y espera su respuesta."
+)
 
 
 def _formato_precio_cop(precio) -> str:
@@ -270,6 +383,9 @@ def consultar_servicios_disponibles(
     y duracion.
     """
     servicios = get_employee_services(employee_id) if employee_id else get_services(business_id)
+    if not _domicilios_activos(business_id):
+        # Domicilios desactivados: el modelo no debe ver el campo, asi no ofrece domicilio.
+        servicios = [{k: v for k, v in s.items() if k != "offers_home_visit"} for s in servicios]
     resultado = {"servicios": servicios}
 
     return Command(
@@ -340,6 +456,7 @@ def consultar_horas_disponibles(
     business_id: BusinessId,
     employee_id: EmployeeId,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    mensajes: Annotated[list, InjectedState("messages")],
     servicio_nombre: Annotated[
         Optional[str], Field(description="Nombre del servicio, para calcular la duracion correcta. Opcional.")
     ] = None,
@@ -356,6 +473,9 @@ def consultar_horas_disponibles(
     if not employee_id:
         error = {"error": "Primero hay que saber con que empleado es la cita. Usa consultar_empleados_disponibles y seleccionar_empleado."}
         return Command(update={"messages": [ToolMessage(content=str(error), tool_call_id=tool_call_id)]})
+
+    if not _cliente_dio_fecha(mensajes):
+        return Command(update={"messages": [ToolMessage(content=MENSAJE_FALTA_FECHA, tool_call_id=tool_call_id)]})
 
     duracion = 30
     if servicio_nombre:
@@ -418,6 +538,15 @@ def pedir_confirmacion_cita(
     employee_id: EmployeeId,
     client_phone: ClientPhone,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    mensajes: Annotated[list, InjectedState("messages")],
+    direccion: Annotated[
+        Optional[str],
+        Field(description="Direccion del cliente SOLO si la cita es a domicilio (el cliente la escribio). Omitela si es en el local."),
+    ] = None,
+    zona: Annotated[
+        Optional[str],
+        Field(description="Municipio/zona del domicilio (uno de los que devuelve consultar_zonas_domicilio). Solo si es a domicilio."),
+    ] = None,
 ) -> Command:
     """
     Llama esta tool SIEMPRE que vayas a pedirle confirmacion al cliente
@@ -430,6 +559,24 @@ def pedir_confirmacion_cita(
     turno — eso solo pasa despues de que el cliente confirme, en un
     mensaje aparte.
     """
+    if not client_phone:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Falta el numero de WhatsApp del cliente y es OBLIGATORIO para agendar (a domicilio o en el local). "
+                            "Pidelo y usa registrar_telefono_cliente antes de pedir la confirmacion."
+                        ),
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    if not _cliente_dio_fecha(mensajes):
+        return Command(update={"messages": [ToolMessage(content=MENSAJE_FALTA_FECHA, tool_call_id=tool_call_id)]})
+
     servicios = get_employee_services(employee_id) if employee_id else []
     servicio = next((s for s in servicios if s["name"].lower() == servicio_nombre.lower()), None)
     precio_texto = f" · {_formato_precio_cop(servicio['price'])}" if servicio else ""
@@ -437,6 +584,13 @@ def pedir_confirmacion_cita(
     empleados_negocio = get_employees(business_id)
     empleado = get_employee_by_id(employee_id) if employee_id else None
     mostrar_empleado = bool(empleado) and len(empleados_negocio) > 1
+
+    error_domicilio = _validar_domicilio(business_id, servicio, direccion, mensajes)
+    zona_elegida = None
+    if not error_domicilio:
+        zona_elegida, error_domicilio = _resolver_zona(business_id, direccion, zona, mensajes)
+    if error_domicilio:
+        return Command(update={"messages": [ToolMessage(content=error_domicilio, tool_call_id=tool_call_id)]})
 
     try:
         fecha_hora_dt = datetime.fromisoformat(fecha_hora)
@@ -472,6 +626,13 @@ def pedir_confirmacion_cita(
     if mostrar_empleado:
         lineas.append(f"🧑 Con: *{empleado.get('name') or 'el equipo'}*")
     lineas.append(f"📅 Cuándo: *{fecha_texto}*")
+    if direccion and direccion.strip():
+        lineas.append(f"🏠 Domicilio en: *{direccion.strip()}*")
+        if zona_elegida and float(zona_elegida["fee"]) > 0:
+            recargo = float(zona_elegida["fee"])
+            total = float(servicio["price"]) + recargo if servicio else recargo
+            lineas.append(f"🚚 Recargo por domicilio ({zona_elegida['name']}): *+{_formato_precio_cop(recargo)}*")
+            lineas.append(f"💰 Total: *{_formato_precio_cop(total)}*")
     lineas.append(f"👤 Nombre: *{nombre_cliente}*")
     if client_phone:
         lineas.append(f"📱 Número: *{_formato_telefono_visible(client_phone)}*")
@@ -498,6 +659,15 @@ def crear_cita(
     business_id: BusinessId,
     client_phone: ClientPhone,
     employee_id: EmployeeId,
+    mensajes: Annotated[list, InjectedState("messages")],
+    direccion: Annotated[
+        Optional[str],
+        Field(description="Direccion del cliente SOLO si la cita es a domicilio (la misma que se confirmo). Omitela si es en el local."),
+    ] = None,
+    zona: Annotated[
+        Optional[str],
+        Field(description="Municipio/zona del domicilio (uno de los que devuelve consultar_zonas_domicilio). Solo si es a domicilio."),
+    ] = None,
 ) -> dict:
     """Crea una cita nueva para el cliente, validando horario y disponibilidad del empleado seleccionado."""
     if not client_phone:
@@ -511,6 +681,13 @@ def crear_cita(
         return {"error": f"No encontre el servicio '{servicio_nombre}' para ese empleado. Servicios disponibles: {[s['name'] for s in servicios]}"}
 
     duracion = servicio.get("duration_minutes", 30)
+
+    error_domicilio = _validar_domicilio(business_id, servicio, direccion, mensajes)
+    zona_elegida = None
+    if not error_domicilio:
+        zona_elegida, error_domicilio = _resolver_zona(business_id, direccion, zona, mensajes)
+    if error_domicilio:
+        return {"error": error_domicilio}
 
     es_valida, mensaje_error = es_hora_valida(fecha_hora, employee_id, duracion)
     if not es_valida:
@@ -529,6 +706,9 @@ def crear_cita(
         service_id=servicio["id"],
         scheduled_at=fecha_hora,
         employee_id=employee_id,
+        address=direccion.strip() if direccion and direccion.strip() else None,
+        home_visit_zone=zona_elegida["name"] if zona_elegida else None,
+        home_visit_fee=float(zona_elegida["fee"]) if zona_elegida else 0,
     )
 
     try:
@@ -738,6 +918,42 @@ def escalar_por_confusion(
     )
 
 
+@tool
+def consultar_zonas_domicilio(
+    business_id: BusinessId,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """
+    Consulta en que municipios/zonas el negocio hace domicilios y el recargo
+    de cada una. Usala cuando el cliente pregunte donde llegan o cuanto
+    cuesta el domicilio, o antes de pedirle la direccion. Si la lista esta
+    vacia, el negocio no restringe zonas ni cobra recargo.
+    """
+    if not _domicilios_activos(business_id):
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Este negocio no hace domicilios: todas las citas son en el local.",
+                        name="consultar_zonas_domicilio",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    zonas = get_home_visit_zones(business_id)
+    resultado = {
+        "zonas": [{"nombre": z["name"], "recargo": _formato_precio_cop(z["fee"])} for z in zonas],
+        "sin_restriccion": not zonas,
+    }
+    return Command(
+        update={
+            "messages": [ToolMessage(content=str(resultado), name="consultar_zonas_domicilio", tool_call_id=tool_call_id)]
+        }
+    )
+
+
 TOOLS = [
     registrar_telefono_cliente,
     consultar_empleados_disponibles,
@@ -745,6 +961,7 @@ TOOLS = [
     consultar_servicios_disponibles,
     seleccionar_servicio,
     consultar_horas_disponibles,
+    consultar_zonas_domicilio,
     pedir_confirmacion_cita,
     crear_cita,
     consultar_citas_cliente,

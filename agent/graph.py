@@ -11,7 +11,7 @@ from psycopg_pool import ConnectionPool
 
 from agent.prompts import build_system_prompt
 from agent.state import AgentState
-from agent.tools import TOOLS
+from agent.tools import _normalizar, TOOLS
 from core.settings import CHAT_MODEL_NAME, DATABASE_URL, OPENAI_API_KEY
 from services.ai_usage_tracking import registrar_uso
 from services.db import get_business_by_id, get_employees, get_employee_services, supabase as client_supabase
@@ -197,8 +197,41 @@ def _thread_config(business_id: str, session_id: str) -> dict:
     }
 
 
+def _opciones_coherentes(
+    nombre_tool: str, opciones: list[dict], respuesta_texto: str, textos_cliente: list[str]
+) -> list[dict] | None:
+    """
+    Los botones salen de la ULTIMA tool del turno, pero el texto final del
+    modelo puede estar preguntando otra cosa (ej. pide la fecha o el nombre
+    despues de haber consultado los servicios o armado un resumen): el
+    cliente veia botones que no correspondian a la pregunta. Solo se dejan
+    si el texto que ve el cliente realmente trata de esas opciones.
+    """
+    respuesta = _normalizar(respuesta_texto)
+    if nombre_tool == "pedir_confirmacion_cita":
+        return opciones if "confirmo tu cita" in respuesta else None
+
+    valores = [_normalizar(str(o.get("value", ""))) for o in opciones]
+    valores = [v for v in valores if v]
+
+    if nombre_tool == "consultar_servicios_disponibles":
+        # Si el cliente ya nombro un servicio, no hay nada que elegir de nuevo.
+        texto_cliente = _normalizar(" ".join(textos_cliente))
+        if any(v in texto_cliente for v in valores):
+            return None
+
+    # Horas ("9:00 am"): basta con que aparezca la hora sin el am/pm.
+    claves = {v for v in valores} | {v.split()[0] for v in valores}
+    return opciones if any(clave in respuesta for clave in claves) else None
+
+
 def _extraer_opciones(
-    mensajes_nuevos: list, ultimas_opciones: list[dict] | None, service_id: str | None, employee_id: str | None
+    mensajes_nuevos: list,
+    ultimas_opciones: list[dict] | None,
+    service_id: str | None,
+    employee_id: str | None,
+    respuesta_texto: str = "",
+    textos_cliente: list[str] | None = None,
 ) -> list[dict] | None:
     """
     Opciones de seleccion rapida (botones) para el widget de chat, solo si
@@ -223,7 +256,9 @@ def _extraer_opciones(
                 return None
             if mensaje.name == "consultar_empleados_disponibles" and employee_id:
                 return None
-            return ultimas_opciones or None
+            if not ultimas_opciones:
+                return None
+            return _opciones_coherentes(mensaje.name, ultimas_opciones, respuesta_texto, textos_cliente or [])
     return None
 
 
@@ -273,13 +308,21 @@ def enviar_mensaje(
         return MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(business), None
 
     mensajes_nuevos = resultado["messages"][mensajes_previos:]
+    respuesta_texto = next(
+        (m.content for m in reversed(resultado["messages"]) if isinstance(m, AIMessage) and m.content), ""
+    )
+    textos_cliente = [str(m.content) for m in resultado["messages"] if isinstance(m, HumanMessage)]
     opciones = _extraer_opciones(
-        mensajes_nuevos, resultado.get("ultimas_opciones"), resultado.get("service_id"), resultado.get("employee_id")
+        mensajes_nuevos,
+        resultado.get("ultimas_opciones"),
+        resultado.get("service_id"),
+        resultado.get("employee_id"),
+        respuesta_texto,
+        textos_cliente,
     )
 
-    for mensaje_respuesta in reversed(resultado["messages"]):
-        if isinstance(mensaje_respuesta, AIMessage) and mensaje_respuesta.content:
-            return mensaje_respuesta.content, opciones
+    if respuesta_texto:
+        return respuesta_texto, opciones
     return MENSAJE_ERROR_TECNICO, None
 
 
@@ -331,6 +374,8 @@ def obtener_historial(business_id: str, session_id: str) -> tuple[list[dict], li
             snapshot.values.get("ultimas_opciones"),
             snapshot.values.get("service_id"),
             snapshot.values.get("employee_id"),
+            historial[-1]["content"],
+            [str(m.content) for m in mensajes if isinstance(m, HumanMessage)],
         )
 
     return historial, opciones

@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+import httpx
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -17,6 +18,47 @@ if not SUPABASE_URL or not SUPABASE_SERVER_KEY:
     )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVER_KEY)
+
+
+class _TransporteConReintento(httpx.HTTPTransport):
+    """
+    Supabase/Cloudflare cierra conexiones keep-alive ociosas; si el cliente
+    reutiliza una ya cerrada falla con "Server disconnected"
+    (httpx.RemoteProtocolError). Se reintenta UNA vez, solo metodos
+    idempotentes, para no duplicar inserts (POST).
+    """
+
+    _IDEMPOTENTES = {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return super().handle_request(request)
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            if request.method not in self._IDEMPOTENTES:
+                raise
+            return super().handle_request(request)
+
+
+def _endurecer_cliente_postgrest(cliente: Client) -> None:
+    """
+    Reemplaza la sesion HTTP de PostgREST: keep-alive corto (evita reutilizar
+    conexiones ya cerradas por el servidor), timeout de 20s en vez de los
+    120s por defecto (una consulta colgada bloqueaba el worker de recordatorios
+    minutos) y el reintento de arriba.
+    """
+    anterior = cliente.postgrest.session
+    cliente.postgrest.session = httpx.Client(
+        base_url=anterior.base_url,
+        headers=anterior.headers,
+        timeout=httpx.Timeout(20.0, connect=10.0),
+        limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=5.0),
+        transport=_TransporteConReintento(limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=5.0)),
+        follow_redirects=True,
+    )
+    anterior.close()
+
+
+_endurecer_cliente_postgrest(supabase)
 
 
 def get_business_by_phone(phone_number: str):
@@ -72,25 +114,46 @@ def get_services(business_id: str):
     return response.data
 
 
+def get_home_visit_zones(business_id: str, solo_activas: bool = True):
+    """Zonas/municipios donde el negocio hace domicilios, con su recargo."""
+    query = supabase.table("home_visit_zones").select("*").eq("business_id", business_id)
+    if solo_activas:
+        query = query.eq("active", True)
+    return query.order("name").execute().data
+
+
 def create_appointment(
-    business_id: str, client_phone: str, client_name: str, service_id: str, scheduled_at: str, employee_id: str
+    business_id: str,
+    client_phone: str,
+    client_name: str,
+    service_id: str,
+    scheduled_at: str,
+    employee_id: str,
+    address: str | None = None,
+    home_visit_zone: str | None = None,
+    home_visit_fee: float = 0,
 ):
-    """Crea una nueva cita, ligada al empleado que la atiende."""
-    response = (
-        supabase.table("appointments")
-        .insert(
-            {
-                "business_id": business_id,
-                "client_phone": client_phone,
-                "client_name": client_name,
-                "service_id": service_id,
-                "scheduled_at": scheduled_at,
-                "employee_id": employee_id,
-                "status": "confirmed",
-            }
-        )
-        .execute()
-    )
+    """
+    Crea una nueva cita, ligada al empleado que la atiende. Si trae
+    `address`, la cita es a domicilio (las columnas is_home_visit/address
+    solo se envian en ese caso).
+    """
+    fila = {
+        "business_id": business_id,
+        "client_phone": client_phone,
+        "client_name": client_name,
+        "service_id": service_id,
+        "scheduled_at": scheduled_at,
+        "employee_id": employee_id,
+        "status": "confirmed",
+    }
+    if address:
+        fila["is_home_visit"] = True
+        fila["address"] = address
+        if home_visit_zone:
+            fila["home_visit_zone"] = home_visit_zone
+            fila["home_visit_fee"] = home_visit_fee
+    response = supabase.table("appointments").insert(fila).execute()
     return response.data
 
 def get_business_by_whatsapp_phone_id(phone_number_id: str):

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
 
-from services.db import get_services, create_appointment, get_business_by_id, get_employee_by_id, supabase
+from services.db import get_home_visit_zones, get_services, create_appointment, get_business_by_id, get_employee_by_id, supabase
 from services.scheduling import es_hora_valida, hay_choque_de_horario, formatear_fecha_natural, generar_horas_disponibles
 from services.auth import obtener_usuario_actual, verificar_acceso_empleado, verificar_dueno
 from services.whatsapp import enviar_confirmacion_cita_cliente, normalizar_numero_whatsapp
@@ -17,6 +17,7 @@ def listar_citas(
     status: str | None = Query(default=None, pattern="^(pending|confirmed|completed|cancelled)$"),
     date_from: str | None = None,
     date_to: str | None = None,
+    home_visit: bool | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user_id: str = Depends(obtener_usuario_actual),
@@ -50,6 +51,8 @@ def listar_citas(
         query = query.gte("scheduled_at", date_from)
     if date_to:
         query = query.lte("scheduled_at", date_to)
+    if home_visit is not None:
+        query = query.eq("is_home_visit", home_visit)
 
     response = query.order("scheduled_at", desc=False).range(offset, offset + limit - 1).execute()
     return {"appointments": response.data, "total": response.count, "limit": limit, "offset": offset}
@@ -102,6 +105,8 @@ class CrearCitaManualInput(BaseModel):
     client_phone: str
     service_id: str
     fecha_hora: str  # formato ISO 8601, ej: 2026-07-01T15:00:00
+    address: str | None = None  # solo si la cita es a domicilio
+    zone: str | None = None  # municipio/zona atendida (obligatoria si el negocio definio zonas)
 
 
 @router.post("/appointments/manual")
@@ -126,6 +131,21 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
 
     duracion = servicio.get("duration_minutes", 30)
 
+    direccion = (data.address or "").strip() or None
+    negocio = get_business_by_id(data.business_id)
+    if direccion and not (negocio or {}).get("home_visits_enabled"):
+        raise HTTPException(status_code=400, detail="Este negocio no tiene los domicilios activados")
+    if direccion and not servicio.get("offers_home_visit"):
+        raise HTTPException(status_code=400, detail="Ese servicio no se presta a domicilio")
+
+    zona_elegida = None
+    if direccion:
+        zonas = get_home_visit_zones(data.business_id)
+        if zonas:
+            zona_elegida = next((z for z in zonas if z["name"].strip().lower() == (data.zone or "").strip().lower()), None)
+            if not zona_elegida:
+                raise HTTPException(status_code=400, detail="Ese lugar esta fuera de las zonas donde se hacen domicilios")
+
     es_valida, mensaje_error = es_hora_valida(data.fecha_hora, data.employee_id, duracion)
     if not es_valida:
         raise HTTPException(status_code=400, detail=mensaje_error)
@@ -143,6 +163,9 @@ def crear_cita_manual(data: CrearCitaManualInput, user_id: str = Depends(obtener
         service_id=data.service_id,
         scheduled_at=data.fecha_hora,
         employee_id=data.employee_id,
+        address=direccion,
+        home_visit_zone=zona_elegida["name"] if zona_elegida else None,
+        home_visit_fee=float(zona_elegida["fee"]) if zona_elegida else 0,
     )
 
     if resultado:

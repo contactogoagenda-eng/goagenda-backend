@@ -82,7 +82,10 @@ class GestorConexionesTiempoReal:
         ese negocio (evita trabajo de mas en el caso comun sin paneles
         conectados).
         """
-        if self._loop is None or not self._conexiones.get(business_id):
+        destinatarios = len(self._conexiones.get(business_id, ()))
+        print(f"[ws] evento {mensaje.get('type')} business={business_id} conexiones={destinatarios}", flush=True)
+
+        if self._loop is None or not destinatarios:
             return
 
         try:

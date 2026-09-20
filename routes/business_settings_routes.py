@@ -155,3 +155,23 @@ def complete_onboarding(data: OnboardingCompleteInput, user_id: str = Depends(ob
     if not response.data:
         raise HTTPException(status_code=404, detail="Negocio no encontrado")
     return {"business": response.data[0]}
+
+
+class HomeVisitsToggle(BaseModel):
+    business_id: str
+    enabled: bool
+
+
+@router.put("/business-settings/home-visits")
+def update_home_visits_enabled(data: HomeVisitsToggle, user_id: str = Depends(obtener_usuario_actual)):
+    """Activa o desactiva los domicilios del negocio (con el flag apagado todo funciona como antes)."""
+    verificar_dueno(data.business_id, user_id)
+    response = (
+        supabase.table("businesses")
+        .update({"home_visits_enabled": data.enabled})
+        .eq("id", data.business_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Negocio no encontrado")
+    return {"business": response.data[0]}

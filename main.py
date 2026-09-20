@@ -28,6 +28,7 @@ from routes.invitation_codes_routes import router as invitation_codes_router
 from routes.employees_routes import router as employees_router
 from routes.me_routes import router as me_router
 from routes.realtime_routes import router as realtime_router
+from routes.home_visit_zones_routes import router as home_visit_zones_router
 
 
 load_dotenv()
@@ -99,6 +100,7 @@ app.include_router(invitation_codes_router)
 app.include_router(employees_router)
 app.include_router(me_router)
 app.include_router(realtime_router)
+app.include_router(home_visit_zones_router)
 
 
 @app.on_event("startup")

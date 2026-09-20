@@ -18,7 +18,7 @@ def obtener_mi_sesion(user_id: str = Depends(obtener_usuario_actual)):
     """
     empleos = (
         supabase.table("employees")
-        .select("id, business_id, name, role, active, businesses(name, blocked, onboarding_completed, onboarding_step)")
+        .select("id, business_id, name, role, active, businesses(*)")
         .eq("user_id", user_id)
         .execute()
     )
@@ -33,6 +33,7 @@ def obtener_mi_sesion(user_id: str = Depends(obtener_usuario_actual)):
                 "business_blocked": (e.get("businesses") or {}).get("blocked"),
                 "business_onboarding_completed": (e.get("businesses") or {}).get("onboarding_completed", True),
                 "business_onboarding_step": (e.get("businesses") or {}).get("onboarding_step", 1),
+                "business_home_visits_enabled": bool((e.get("businesses") or {}).get("home_visits_enabled", False)),
                 "name": e.get("name"),
                 "role": e["role"],
                 "active": e["active"],
