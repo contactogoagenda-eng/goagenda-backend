@@ -43,6 +43,14 @@ def _formato_hora_12h(hora_24: str) -> str:
     return datetime.strptime(hora_24, "%H:%M").strftime("%I:%M %p").lstrip("0").lower()
 
 
+def _muestra_repartida(items: list[str], n: int) -> list[str]:
+    """Hasta n elementos de la lista repartidos parejo (incluye el primero y el ultimo)."""
+    if len(items) <= n:
+        return list(items)
+    pasos = n - 1
+    return [items[round(i * (len(items) - 1) / pasos)] for i in range(n)]
+
+
 def _formato_precio_cop(precio) -> str:
     """Formatea un precio como '$15.000' (separador de miles con punto, sin decimales)."""
     try:
@@ -374,6 +382,10 @@ def consultar_horas_disponibles(
         # Equivalencia am/pm -> 24h de CADA hora libre: evita que el modelo tenga que
         # convertir "12:30 am" (00:30) y la confunda con 12:30 (mediodia, almuerzo).
         "equivalencias_am_pm_a_24h": {_formato_hora_12h(h): h for h in horas_libres},
+        # Muestra ya armada (5 horas REALES repartidas a lo largo del dia) que el modelo
+        # debe mostrar tal cual: cuando la armaba el, llegaba a inventar rangos (ej. 9-11 am)
+        # que no correspondian a la disponibilidad real.
+        "muestra_para_mostrar": [_formato_hora_12h(h) for h in _muestra_repartida(horas_libres, 5)],
         # La IA necesita esto para poder explicarle al cliente POR QUE no hay
         # horas (el empleado no trabaja ese dia vs. simplemente todo ocupado),
         # en vez de adivinar o saltar de dia en silencio.
@@ -431,6 +443,27 @@ def pedir_confirmacion_cita(
         fecha_texto = formatear_fecha_natural(fecha_hora_dt)
     except ValueError:
         fecha_texto = fecha_hora
+        fecha_hora_dt = None
+
+    # Validacion determinista ANTES de pedir confirmacion: asi la unica fuente de
+    # "esa hora no esta disponible" es el sistema, no el criterio del modelo.
+    if fecha_hora_dt is not None and employee_id:
+        duracion_cita = (servicio or {}).get("duration_minutes", 30)
+        es_valida, mensaje_error = es_hora_valida(fecha_hora, employee_id, duracion_cita)
+        if es_valida:
+            hay_choque, mensaje_error = hay_choque_de_horario(business_id, employee_id, fecha_hora_dt, duracion_cita)
+            es_valida = not hay_choque
+        if not es_valida:
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=f"No se puede agendar esa hora: {mensaje_error} Ofrecele otras horas consultando consultar_horas_disponibles.",
+                            tool_call_id=tool_call_id,
+                        )
+                    ]
+                }
+            )
 
     lineas = [
         "¡Perfecto! Confírmame estos datos por favor 📋",
