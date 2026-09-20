@@ -93,6 +93,7 @@ def _notificar_negocio_escalamiento(business_id: str, session_id: str, nombre_cl
 def registrar_telefono_cliente(
     numero_whatsapp: Annotated[str, Field(description="Numero de WhatsApp que dio el cliente, en cualquier formato (con o sin indicativo +57).")],
     tool_call_id: Annotated[str, InjectedToolCallId],
+    mensajes: Annotated[list, InjectedState("messages")],
 ) -> Command:
     """
     Guarda el numero de WhatsApp del cliente para poder identificarlo en
@@ -113,6 +114,27 @@ def registrar_telefono_cliente(
                         content=(
                             "Ese numero no parece un WhatsApp colombiano valido (celular de 10 digitos que empieza "
                             "en 3, con o sin el indicativo 57 adelante). Pidele al cliente que lo escriba de nuevo."
+                        ),
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    # Guardia contra alucinaciones: el modelo llego a inventar un numero
+    # (ej. 3001234567) que el cliente nunca escribio. Solo se acepta si esos
+    # digitos aparecen en algun mensaje del propio cliente.
+    digitos_cliente = "".join(
+        c for m in mensajes if getattr(m, "type", None) == "human" for c in str(m.content) if c.isdigit()
+    )
+    if numero_normalizado[2:] not in digitos_cliente:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "El cliente todavia no ha escrito ese numero. NO lo inventes ni lo deduzcas: "
+                            "pidele que te escriba su numero de WhatsApp."
                         ),
                         tool_call_id=tool_call_id,
                     )
