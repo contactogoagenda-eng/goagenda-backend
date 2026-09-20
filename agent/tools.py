@@ -349,6 +349,9 @@ def consultar_horas_disponibles(
     horas_libres = generar_horas_disponibles(business_id, employee_id, fecha_iso, duracion)
     resultado = {
         "horas_disponibles": horas_libres,
+        # Equivalencia am/pm -> 24h de CADA hora libre: evita que el modelo tenga que
+        # convertir "12:30 am" (00:30) y la confunda con 12:30 (mediodia, almuerzo).
+        "equivalencias_am_pm_a_24h": {_formato_hora_12h(h): h for h in horas_libres},
         # La IA necesita esto para poder explicarle al cliente POR QUE no hay
         # horas (el empleado no trabaja ese dia vs. simplemente todo ocupado),
         # en vez de adivinar o saltar de dia en silencio.
