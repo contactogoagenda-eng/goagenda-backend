@@ -35,6 +35,10 @@ MENSAJE_NEGOCIO_NO_DISPONIBLE = (
 RECURSION_LIMIT = 12
 LLM_MAX_INTENTOS = 3
 LLM_ESPERA_ENTRE_INTENTOS_SEGUNDOS = 1.5
+# Baja (default de la API es ~1.0) porque este agente necesita precision en
+# datos concretos (fechas, horas, precios, ids) mas que creatividad - una
+# temperatura alta aumenta el riesgo de que invente o redondee esos datos.
+LLM_TEMPERATURE = 0.3
 
 # Tools cuyo resultado el widget de chat puede ofrecer como botones de
 # seleccion rapida (el cliente toca en vez de escribir).
@@ -58,7 +62,9 @@ _pool = ConnectionPool(
 _checkpointer = PostgresSaver(_pool)
 _checkpointer.setup()
 
-_model = ChatOpenAI(model=CHAT_MODEL_NAME, api_key=OPENAI_API_KEY, max_retries=3).bind_tools(TOOLS)
+_model = ChatOpenAI(
+    model=CHAT_MODEL_NAME, api_key=OPENAI_API_KEY, temperature=LLM_TEMPERATURE, max_retries=3
+).bind_tools(TOOLS)
 
 
 def _construir_horario_texto(business_id: str) -> str:

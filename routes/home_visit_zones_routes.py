@@ -1,22 +1,51 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.auth import obtener_usuario_actual, verificar_acceso_negocio, verificar_dueno
 from services.db import supabase
 
 router = APIRouter(tags=["home-visit-zones"])
 
+MAX_ALIASES_POR_ZONA = 10
+
+
+def _limpiar_alias(alias: list[str] | None) -> list[str]:
+    """Recorta espacios, descarta vacios y duplicados (sin importar mayusculas), y limita la cantidad."""
+    if not alias:
+        return []
+    vistos: set[str] = set()
+    limpios: list[str] = []
+    for a in alias:
+        a = a.strip()
+        if not a or a.lower() in vistos:
+            continue
+        vistos.add(a.lower())
+        limpios.append(a[:80])
+    return limpios[:MAX_ALIASES_POR_ZONA]
+
 
 class ZoneCreate(BaseModel):
     business_id: str
     name: str = Field(min_length=1, max_length=80)
     fee: float = Field(default=0, ge=0)
+    aliases: list[str] = Field(default_factory=list)
+
+    @field_validator("aliases")
+    @classmethod
+    def _validar_aliases(cls, v: list[str]) -> list[str]:
+        return _limpiar_alias(v)
 
 
 class ZoneUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     fee: float | None = Field(default=None, ge=0)
     active: bool | None = None
+    aliases: list[str] | None = None
+
+    @field_validator("aliases")
+    @classmethod
+    def _validar_aliases(cls, v: list[str] | None) -> list[str] | None:
+        return _limpiar_alias(v) if v is not None else None
 
 
 def _business_id_de_zona(zone_id: str) -> str:
@@ -47,7 +76,7 @@ def create_zone(data: ZoneCreate, user_id: str = Depends(obtener_usuario_actual)
 
     response = (
         supabase.table("home_visit_zones")
-        .insert({"business_id": data.business_id, "name": nombre, "fee": data.fee, "active": True})
+        .insert({"business_id": data.business_id, "name": nombre, "fee": data.fee, "aliases": data.aliases, "active": True})
         .execute()
     )
     return {"zone": response.data[0] if response.data else None}

@@ -8,6 +8,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import Field
+from rapidfuzz import fuzz
 
 from services.db import (
     get_home_visit_zones,
@@ -20,6 +21,7 @@ from services.db import (
     get_employee_services,
     get_business_by_id,
 )
+from services.geocoding import geocodificar, localidades_de
 from services.push_notifications import enviar_notificacion_escalamiento
 from services.realtime import gestor_tiempo_real
 from services.scheduling import (
@@ -90,18 +92,124 @@ def _normalizar(texto: str) -> str:
     return "".join(c for c in sin_tildes if unicodedata.category(c) != "Mn").lower().strip()
 
 
+# Umbrales de similitud (0-100, rapidfuzz.fuzz.ratio) para el matching
+# aproximado de zonas: tolera errores de tipeo/tildes que el substring
+# literal exacto no perdonaba (ej. "Betulua" en vez de "Betulia").
+# Calibrados empiricamente con nombres de municipios/barrios reales: typos
+# de 1 caracter (sustitucion, omision) en palabras de 5+ letras dan
+# consistentemente 80-93; pares de lugares realmente distintos dan 0-46 -
+# hay un margen amplio (46 a 80) entre "typo" y "otra cosa" para separar
+# los 3 niveles con seguridad.
+# FUERTE: se acepta automaticamente (typo menor, tilde, mayuscula).
+# SUGERIR: parecido pero no suficiente para asumirlo solo - el bot debe
+#   confirmarlo explicitamente con el cliente antes de continuar, nunca
+#   adivinar en silencio.
+_UMBRAL_ZONA_FUERTE = 84
+_UMBRAL_ZONA_SUGERIR = 68
+
+
+def _generar_ngramas(tokens: list[str], n: int) -> list[str]:
+    """Todas las secuencias de n palabras consecutivas en tokens (para comparar contra nombres de zona de varias palabras)."""
+    if n <= 0 or len(tokens) < n:
+        return []
+    return [" ".join(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
+
+
+def _nombres_candidatos_zona(zona: dict) -> list[str]:
+    """El nombre de la zona mas sus alias (variantes que el dueño registro), todos como posibles textos a matchear."""
+    return [zona["name"], *[a for a in (zona.get("aliases") or []) if a]]
+
+
+def _mejor_coincidencia_zona(texto_normalizado: str, zonas: list[dict]) -> tuple[dict | None, int]:
+    """
+    Busca, entre el nombre y los alias de cada zona, cual tiene mayor
+    similitud aproximada (rapidfuzz.fuzz.ratio) con ALGUNA secuencia de
+    palabras consecutivas del texto normalizado dado. Retorna
+    (zona con mejor score, score 0-100), o (None, 0) si zonas esta vacio.
+    """
+    tokens = texto_normalizado.split()
+    mejor_zona: dict | None = None
+    mejor_score = 0
+
+    for z in zonas:
+        for nombre in _nombres_candidatos_zona(z):
+            nombre_normalizado = _normalizar(nombre)
+            n_palabras = len(nombre_normalizado.split())
+            for ngrama in _generar_ngramas(tokens, n_palabras):
+                score = fuzz.ratio(nombre_normalizado, ngrama)
+                if score > mejor_score:
+                    mejor_score = score
+                    mejor_zona = z
+
+    return mejor_zona, mejor_score
+
+
+def _texto_menciona_zona(texto_normalizado: str, zona: dict) -> bool:
+    """True si el nombre de la zona (o un alias) aparece, exacto o con tolerancia fuerte a typos, en el texto dado."""
+    for nombre in _nombres_candidatos_zona(zona):
+        if _normalizar(nombre) in texto_normalizado:
+            return True
+    _, score = _mejor_coincidencia_zona(texto_normalizado, [zona])
+    return score >= _UMBRAL_ZONA_FUERTE
+
+
+def _zona_por_localidad(localidad: str, zonas: list[dict]) -> dict | None:
+    """Una zona cuyo nombre o alias coincide (tolerancia fuerte a typos) con el nombre de una localidad geocodificada."""
+    localidad_normalizada = _normalizar(localidad)
+    for z in zonas:
+        for nombre in _nombres_candidatos_zona(z):
+            if fuzz.ratio(_normalizar(nombre), localidad_normalizada) >= _UMBRAL_ZONA_FUERTE:
+                return z
+    return None
+
+
+def _inferir_zona_por_geocodificacion(direccion: str, zonas: list[dict]) -> tuple[dict | None, str | None]:
+    """
+    Intenta geocodificar la direccion (Nominatim, ver services/geocoding.py)
+    y, si alguna de las localidades que devuelve (barrio, ciudad, municipio)
+    coincide con una zona configurada, la retorna directamente - asi el
+    cliente no tiene que decir el nombre EXACTO de la zona, basta con dar
+    una direccion real.
+
+    Retorna (zona, None) si encontro una coincidencia; (None, lugar) si
+    geocodifico una direccion real pero ninguna localidad coincide con una
+    zona (para armar un mensaje de "fuera de cobertura" mas preciso, con el
+    lugar real en vez de un generico); o (None, None) si Nominatim no
+    encontro nada o fallo - en ese caso el caller sigue con el matching por
+    texto de siempre, sin bloquear el flujo por esto.
+    """
+    resultado_geo = geocodificar(direccion)
+    if not resultado_geo:
+        return None, None
+
+    localidades = localidades_de(resultado_geo)
+    for localidad in localidades:
+        zona_geo = _zona_por_localidad(localidad, zonas)
+        if zona_geo:
+            return zona_geo, None
+
+    return None, (localidades[0] if localidades else None)
+
+
 def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, mensajes: list) -> tuple[dict | None, str | None]:
     """
     Politica de domicilios del negocio: valida que el lugar del cliente este
     dentro de las zonas donde se hacen domicilios y devuelve (zona, error).
     - Sin zonas configuradas: domicilio libre, sin recargo (zona None, sin error).
-    - Con zonas: el nombre de una zona activa debe aparecer en lo que escribio
-      el cliente (direccion o mensajes); no se acepta una zona que solo dijo el modelo.
+    - Con zonas: primero intenta geocodificar la direccion real (Nominatim)
+      para inferir la zona automaticamente sin que el cliente tenga que
+      decir su nombre exacto; si eso no aplica (direccion no encontrada,
+      Nominatim caido, o el lugar real no coincide con ninguna zona), cae al
+      matching por texto: nombre/alias de una zona activa en lo que escribio
+      el cliente, tolerando errores de tipeo/tildes/mayusculas (rapidfuzz)
+      en vez de exigir el substring exacto de antes. Un match solo
+      "parecido" (no fuerte) NUNCA se acepta en silencio: el error le pide
+      al bot que se lo confirme al cliente antes de continuar.
     """
     if not direccion or not direccion.strip():
         return None, None
 
-    zonas = get_home_visit_zones(business_id)
+    zonas = [z for z in get_home_visit_zones(business_id) if z.get("active", True)]
     if not zonas:
         return None, None
 
@@ -111,22 +219,77 @@ def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, me
     listado = ", ".join(f"{z['name']} (recargo {_formato_precio_cop(z['fee'])})" for z in zonas)
 
     if zona and zona.strip():
-        elegida = next((z for z in zonas if _normalizar(z["name"]) == _normalizar(zona)), None)
+        zona_normalizada = _normalizar(zona)
+        elegida = next(
+            (
+                z
+                for z in zonas
+                if zona_normalizada == _normalizar(z["name"])
+                or zona_normalizada in {_normalizar(a) for a in (z.get("aliases") or [])}
+            ),
+            None,
+        )
         if not elegida:
-            return None, (
-                f"Ese lugar esta fuera de la zona de cobertura de domicilios. Zonas donde SI se llega: {listado}. "
-                "Explicaselo al cliente y ofrecele agendar en el local o en una de esas zonas."
-            )
+            mejor_zona, score = _mejor_coincidencia_zona(zona_normalizada, zonas)
+            if mejor_zona and score >= _UMBRAL_ZONA_FUERTE:
+                elegida = mejor_zona
+            else:
+                return None, (
+                    f"Ese lugar esta fuera de la zona de cobertura de domicilios. Zonas donde SI se llega: {listado}. "
+                    "Explicaselo al cliente y ofrecele agendar en el local o en una de esas zonas."
+                )
     else:
-        coincidencias = [z for z in zonas if _normalizar(z["name"]) in texto_cliente]
-        if not coincidencias:
-            return None, (
-                "No puedo confirmar si esa direccion esta dentro de la cobertura de domicilios. "
-                f"Pregunta al cliente en que municipio/zona esta. Zonas donde SI se llega: {listado}."
-            )
-        elegida = coincidencias[0]
+        exactas = [z for z in zonas if any(_normalizar(n) in texto_cliente for n in _nombres_candidatos_zona(z))]
+        if exactas:
+            elegida = exactas[0]
+        else:
+            # La geocodificacion es SIEMPRE una señal positiva (para inferir
+            # sin que el cliente diga el nombre), nunca una negativa
+            # definitiva por si sola: Nominatim puede resolver una
+            # direccion ambigua hacia el lugar equivocado (ej. "Laureles"
+            # sin mas contexto puede caer en un barrio de Bogota en vez del
+            # de Medellin donde de verdad opera el negocio). Si no matchea
+            # ninguna zona, NO se rechaza aqui - se sigue intentando por
+            # texto (que compara contra lo que el cliente realmente
+            # escribio) y el lugar geocodificado solo se usa para enriquecer
+            # el mensaje final si de verdad no se encuentra nada por ningun
+            # lado.
+            zona_geo, lugar_geo = _inferir_zona_por_geocodificacion(direccion, zonas)
+            if zona_geo:
+                # Inferida de la direccion real (no de palabras que el
+                # cliente escribio): el nombre de la zona puede no aparecer
+                # literalmente en su mensaje, asi que se retorna directo,
+                # sin pasar por el guard de texto de mas abajo (pensado
+                # para detectar zonas que el modelo invento, no aplica aqui
+                # porque el origen es geocodificacion, no el LLM).
+                return zona_geo, None
 
-    if _normalizar(elegida["name"]) not in texto_cliente:
+            mejor_zona, score = _mejor_coincidencia_zona(texto_cliente, zonas)
+            if mejor_zona and score >= _UMBRAL_ZONA_FUERTE:
+                elegida = mejor_zona
+            elif mejor_zona and score >= _UMBRAL_ZONA_SUGERIR:
+                return None, (
+                    f"El cliente podria estar refiriendose a la zona '{mejor_zona['name']}' "
+                    f"(recargo {_formato_precio_cop(mejor_zona['fee'])}), pero no es seguro por como lo escribio. "
+                    "PREGUNTALE explicitamente si es esa zona antes de continuar - NO la des por confirmada tu "
+                    f"solo. Si dice que no es esa, o menciona otro lugar, vuelve a intentar. Zonas donde SI se "
+                    f"llega: {listado}."
+                )
+            elif lugar_geo:
+                # Ni el texto ni la zona geocodificada matchean ninguna
+                # zona: aqui si se usa el lugar geocodificado, como
+                # informacion adicional (no como unica fuente de verdad).
+                return None, (
+                    f"Segun la direccion, el cliente podria estar en {lugar_geo}, que no esta entre las zonas de "
+                    f"cobertura de domicilios. Confirmaselo y ofrecele agendar en el local o en: {listado}."
+                )
+            else:
+                return None, (
+                    "No puedo confirmar si esa direccion esta dentro de la cobertura de domicilios. "
+                    f"Pregunta al cliente en que municipio/zona esta. Zonas donde SI se llega: {listado}."
+                )
+
+    if not _texto_menciona_zona(texto_cliente, elegida):
         return None, (
             "El cliente todavia no ha dicho en que municipio/zona esta. NO lo supongas: preguntaselo. "
             f"Zonas donde SI se llega: {listado}."
