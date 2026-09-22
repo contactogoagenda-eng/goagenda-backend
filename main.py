@@ -29,6 +29,10 @@ from routes.employees_routes import router as employees_router
 from routes.me_routes import router as me_router
 from routes.realtime_routes import router as realtime_router
 from routes.home_visit_zones_routes import router as home_visit_zones_router
+from routes.wompi_settings_routes import router as wompi_settings_router
+from routes.wompi_payment_requests_routes import router as wompi_payment_requests_router
+from routes.wompi_webhook_routes import router as wompi_webhook_router
+from services.wompi_payment_requests import expirar_solicitudes_vencidas
 
 
 load_dotenv()
@@ -64,6 +68,7 @@ TAGS_METADATA = [
     {"name": "super-admin", "description": "Endpoints exclusivos del super admin: crear negocios, bloquearlos, y generar sus codigos de invitacion de dueño."},
     {"name": "whatsapp", "description": "Integracion saliente de WhatsApp (Meta Cloud API y el microservicio Baileys): recordatorios y confirmacion de citas. El bot conversacional ya no responde por aqui."},
     {"name": "realtime", "description": "WebSocket de notificaciones de citas en tiempo real para el panel (ver README, seccion 'WebSocket de tiempo real'). No aparece en este /docs porque OpenAPI no documenta WebSockets."},
+    {"name": "wompi", "description": "Configuracion de la pasarela de pagos Wompi por negocio (credenciales encriptadas, multi-tenant) y links de pago generados desde el chat."},
     {"name": "sistema", "description": "Endpoints generales del servicio."},
     {"name": "herramientas-internas", "description": "Endpoints de prueba/operacion protegidos con la api key interna (no para el frontend)."},
 ]
@@ -101,6 +106,11 @@ app.include_router(employees_router)
 app.include_router(me_router)
 app.include_router(realtime_router)
 app.include_router(home_visit_zones_router)
+app.include_router(wompi_settings_router)
+app.include_router(wompi_payment_requests_router)
+# Webhook de Wompi: publico (sin auth de usuario), protegido por la firma
+# SHA256 del secreto de eventos de cada negocio (ver routes/wompi_webhook_routes.py).
+app.include_router(wompi_webhook_router)
 
 
 @app.on_event("startup")
@@ -270,10 +280,13 @@ def test_reminders():
 
 
 # ---------------------------------------------------------
-# Scheduler: revisa cada 5 minutos si hay recordatorios pendientes
+# Scheduler: revisa cada 5 minutos si hay recordatorios pendientes, y cada
+# 15 minutos expira las solicitudes de pago de Wompi vencidas (ver
+# services/wompi_payment_requests.py:expirar_solicitudes_vencidas).
 # ---------------------------------------------------------
 scheduler = BackgroundScheduler()
 scheduler.add_job(revisar_y_enviar_recordatorios, "interval", minutes=5)
+scheduler.add_job(expirar_solicitudes_vencidas, "interval", minutes=15)
 scheduler.start()
 
 atexit.register(lambda: scheduler.shutdown())

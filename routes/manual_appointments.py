@@ -14,7 +14,7 @@ router = APIRouter(tags=["appointments"])
 def listar_citas(
     business_id: str,
     employee_id: str | None = None,
-    status: str | None = Query(default=None, pattern="^(pending|confirmed|completed|cancelled)$"),
+    status: str | None = Query(default=None, pattern="^(pending|pending_payment|confirmed|completed|cancelled)$"),
     date_from: str | None = None,
     date_to: str | None = None,
     home_visit: bool | None = None,

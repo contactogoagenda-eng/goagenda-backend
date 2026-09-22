@@ -12,7 +12,6 @@ from pydantic import Field
 from services.db import (
     get_home_visit_zones,
     get_services,
-    create_appointment,
     get_client_appointments,
     get_appointment_by_id_and_phone,
     update_appointment_schedule,
@@ -39,6 +38,7 @@ BusinessId = Annotated[str, InjectedState("business_id")]
 SessionId = Annotated[str, InjectedState("session_id")]
 ClientPhone = Annotated[Optional[str], InjectedState("client_phone")]
 EmployeeId = Annotated[Optional[str], InjectedState("employee_id")]
+EmployeeFijo = Annotated[bool, InjectedState("employee_fijo")]
 
 
 def _formato_hora_12h(hora_24: str) -> str:
@@ -659,6 +659,8 @@ def crear_cita(
     business_id: BusinessId,
     client_phone: ClientPhone,
     employee_id: EmployeeId,
+    employee_fijo: EmployeeFijo,
+    session_id: SessionId,
     mensajes: Annotated[list, InjectedState("messages")],
     direccion: Annotated[
         Optional[str],
@@ -669,7 +671,16 @@ def crear_cita(
         Field(description="Municipio/zona del domicilio (uno de los que devuelve consultar_zonas_domicilio). Solo si es a domicilio."),
     ] = None,
 ) -> dict:
-    """Crea una cita nueva para el cliente, validando horario y disponibilidad del empleado seleccionado."""
+    """
+    Agenda la cita para el cliente, validando horario y disponibilidad del
+    empleado seleccionado. Si el servicio requiere abono
+    (payment_type/requires_payment del servicio), la cita AUN NO se crea:
+    se genera un link de pago de Wompi y la cita se agenda automaticamente
+    (sin que el negocio tenga que hacer nada) solo cuando Wompi confirme
+    el pago - el resultado trae pago_pendiente=True en vez de cita_creada
+    en ese caso. Revisa el campo pago_pendiente en el resultado para saber
+    cual de los dos casos ocurrio.
+    """
     if not client_phone:
         return {"error": "Antes de agendar necesito el numero de WhatsApp del cliente. Pidelo y usa registrar_telefono_cliente."}
     if not employee_id:
@@ -699,55 +710,97 @@ def crear_cita(
     if hay_choque:
         return {"error": mensaje_choque}
 
-    resultado = create_appointment(
+    direccion_limpia = direccion.strip() if direccion and direccion.strip() else None
+    zona_nombre = zona_elegida["name"] if zona_elegida else None
+    zona_fee = float(zona_elegida["fee"]) if zona_elegida else 0
+
+    if servicio.get("requires_payment"):
+        # Se agenda de inmediato como "pending_payment": bloquea el cupo
+        # desde ya (cuenta para el choque de horario y para el indice
+        # unico de appointments_pending_payment.sql), aunque todavia no es
+        # una cita confirmada. Pasa a "confirmed" solo cuando Wompi
+        # apruebe el pago (ver confirmar_cita_desde_pago en
+        # services/wompi_payment_requests.py); si el link vence sin pagar,
+        # se cancela y libera el cupo (expirar_solicitudes_vencidas).
+        from services.appointment_confirmation import crear_cita_pendiente_pago
+        from services.wompi_payment_requests import crear_solicitud_pago
+
+        cita_pendiente = crear_cita_pendiente_pago(
+            business_id=business_id,
+            client_phone=client_phone,
+            client_name=nombre_cliente,
+            service_id=servicio["id"],
+            scheduled_at=fecha_hora,
+            employee_id=employee_id,
+            address=direccion_limpia,
+            home_visit_zone=zona_nombre,
+            home_visit_fee=zona_fee,
+        )
+
+        if not cita_pendiente:
+            # El indice unico rechazo el insert: alguien mas tomo ese
+            # horario en el mismo instante (carrera real de concurrencia).
+            return {
+                "error": "Esa hora se acaba de ocupar (otro cliente la tomo justo ahora). Ofrecele consultar_horas_disponibles de nuevo para elegir otra."
+            }
+
+        try:
+            solicitud = crear_solicitud_pago(
+                business_id=business_id,
+                servicio=servicio,
+                session_id=session_id,
+                client_phone=client_phone,
+                appointment_id=cita_pendiente["id"],
+                # Solo si el chat era el enlace propio de un empleado: el
+                # localStorage del widget guarda el session_id bajo una
+                # clave con employee_id SOLO en ese caso (ver
+                # chat.page.ts), asi que enviar el employee_id cuando el
+                # cliente esta en el chat general haria que el redirect lo
+                # mande a una URL donde el widget no encuentra su sesion.
+                employee_id=employee_id if employee_fijo else None,
+                expira_en_horas=1.0,
+            )
+        except Exception as e:
+            print(f"No se pudo generar el link de pago de Wompi para la cita {cita_pendiente['id']}: {e}")
+            solicitud = None
+
+        if not solicitud:
+            # No se pudo generar el link: no dejar el cupo bloqueado sin
+            # forma de pagarlo, se libera de inmediato.
+            from services.db import update_appointment_status
+
+            update_appointment_status(cita_pendiente["id"], "cancelled")
+            return {
+                "error": (
+                    "Este servicio requiere un abono para agendar, pero no fue posible generar el link de pago "
+                    "en este momento (problema tecnico o el negocio no tiene Wompi configurado). Explicaselo al "
+                    "cliente y ofrece transferir_a_equipo si insiste en agendar ahora."
+                )
+            }
+
+        return {
+            "pago_pendiente": True,
+            "link_pago": solicitud["checkout_url"],
+            "monto_abono_cents": solicitud["amount_in_cents"],
+            "descripcion_abono": solicitud["description"],
+        }
+
+    from services.appointment_confirmation import finalizar_creacion_cita
+
+    cita = finalizar_creacion_cita(
         business_id=business_id,
         client_phone=client_phone,
         client_name=nombre_cliente,
         service_id=servicio["id"],
+        service_name=servicio["name"],
         scheduled_at=fecha_hora,
         employee_id=employee_id,
-        address=direccion.strip() if direccion and direccion.strip() else None,
-        home_visit_zone=zona_elegida["name"] if zona_elegida else None,
-        home_visit_fee=float(zona_elegida["fee"]) if zona_elegida else 0,
+        address=direccion_limpia,
+        home_visit_zone=zona_nombre,
+        home_visit_fee=zona_fee,
     )
 
-    try:
-        from services.db import get_business_by_id
-        from services.push_notifications import enviar_notificacion_nueva_cita
-        from services.scheduling import formatear_fecha_natural
-
-        business = get_business_by_id(business_id)
-        enviar_notificacion_nueva_cita(
-            fcm_token=business.get("fcm_token") if business else None,
-            nombre_cliente=nombre_cliente,
-            servicio=servicio["name"],
-            fecha_hora_texto=formatear_fecha_natural(fecha_hora_dt),
-        )
-    except Exception as e:
-        print(f"No se pudo enviar la notificacion push: {e}")
-
-    try:
-        from services.db import get_business_by_id
-        from services.scheduling import formatear_fecha_natural
-        from services.whatsapp import enviar_confirmacion_cita_cliente
-
-        business = get_business_by_id(business_id)
-        enviar_confirmacion_cita_cliente(
-            client_phone=client_phone,
-            nombre_cliente=nombre_cliente,
-            nombre_negocio=business.get("name", "el negocio") if business else "el negocio",
-            nombre_servicio=servicio["name"],
-            fecha_hora_texto=formatear_fecha_natural(fecha_hora_dt),
-        )
-    except Exception as e:
-        print(f"No se pudo enviar la confirmacion de cita por WhatsApp al cliente: {e}")
-
-    if resultado:
-        from services.realtime import emitir_evento_cita
-
-        emitir_evento_cita("appointment.created", business_id, resultado[0]["id"])
-
-    return {"cita_creada": resultado}
+    return {"cita_creada": [cita] if cita else []}
 
 
 @tool

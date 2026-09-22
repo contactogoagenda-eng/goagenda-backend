@@ -339,6 +339,22 @@ def enviar_respuesta_humana(business_id: str, session_id: str, mensaje: str) -> 
     GRAPH.update_state(config, {"messages": [AIMessage(content=mensaje)], "transferido": True})
 
 
+def enviar_notificacion_sistema(business_id: str, session_id: str, mensaje: str) -> None:
+    """
+    Igual que enviar_respuesta_humana (escribe un mensaje del asistente
+    directo en el checkpointer, sin invocar el modelo), pero SIN marcar
+    transferido=True: el bot sigue respondiendo con normalidad despues. Se
+    usa para mensajes automaticos del sistema que no implican que un
+    humano tomo la conversacion, ej. la confirmacion de un pago de Wompi
+    (ver routes/wompi_webhook_routes.py). Si el thread no existe todavia
+    (session_id invalido o conversacion nunca iniciada), no hace nada.
+    """
+    config = _thread_config(business_id, session_id)
+    if not GRAPH.get_state(config).values:
+        return
+    GRAPH.update_state(config, {"messages": [AIMessage(content=mensaje)]})
+
+
 def obtener_historial(business_id: str, session_id: str) -> tuple[list[dict], list[dict] | None]:
     """
     Lee el historial persistido de una sesion (solo turnos humano/IA, sin

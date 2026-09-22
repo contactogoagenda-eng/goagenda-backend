@@ -98,6 +98,15 @@ def enviar_notificacion_cita_reprogramada(
     )
 
 
+def enviar_notificacion_pago_recibido(fcm_token: str, monto_texto: str, descripcion: str):
+    """Notifica al negocio cuando Wompi confirma el pago de un abono solicitado por el chat."""
+    _enviar_push(
+        fcm_token,
+        titulo="Pago recibido",
+        cuerpo=f"Se confirmo un abono de {monto_texto} ({descripcion})",
+    )
+
+
 def enviar_notificacion_escalamiento(fcm_token: str, nombre_cliente: str, business_id: str, session_id: str):
     """
     Notifica al negocio que un cliente necesita atencion humana en el chat

@@ -79,8 +79,12 @@ def get_business_by_id(business_id: str):
 
 def get_confirmed_appointments_for_day(business_id: str, fecha: str, employee_id: str | None = None):
     """
-    Trae las citas confirmadas de un negocio para un dia especifico (fecha 'YYYY-MM-DD'),
-    junto con la duracion de su servicio. Se usa para detectar choques de horario.
+    Trae las citas de un negocio para un dia especifico (fecha 'YYYY-MM-DD')
+    que ocupan un cupo: 'confirmed' y 'pending_payment' (un abono en
+    espera de pago bloquea el horario igual que una confirmada, ver
+    appointments_pending_payment.sql - si no contara aqui, el chat seguiria
+    ofreciendo esa hora a otro cliente mientras el primero esta pagando).
+    Junto con la duracion de su servicio, para detectar choques de horario.
     Si se pasa employee_id, solo trae las citas de ese empleado (cada uno
     tiene su propia agenda, asi que dos empleados pueden tener una cita a
     la misma hora sin que sea un choque real).
@@ -92,7 +96,7 @@ def get_confirmed_appointments_for_day(business_id: str, fecha: str, employee_id
         supabase.table("appointments")
         .select("*, services(duration_minutes)")
         .eq("business_id", business_id)
-        .eq("status", "confirmed")
+        .in_("status", ["confirmed", "pending_payment"])
         .gte("scheduled_at", inicio_dia)
         .lte("scheduled_at", fin_dia)
     )
@@ -132,11 +136,19 @@ def create_appointment(
     address: str | None = None,
     home_visit_zone: str | None = None,
     home_visit_fee: float = 0,
+    status: str = "confirmed",
 ):
     """
     Crea una nueva cita, ligada al empleado que la atiende. Si trae
     `address`, la cita es a domicilio (las columnas is_home_visit/address
-    solo se envian en ese caso).
+    solo se envian en ese caso). `status` es "confirmed" por defecto;
+    los servicios con abono la crean como "pending_payment" (bloquea el
+    cupo igual que una confirmada, ver appointments_pending_payment.sql)
+    hasta que Wompi confirme el pago - ver
+    services/appointment_confirmation.py. El indice unico parcial de esa
+    migracion hace que este insert falle (postgrest.exceptions.APIError,
+    code "23505") si alguien mas ya tiene ese mismo horario reservado;
+    el caller debe atrapar ese caso.
     """
     fila = {
         "business_id": business_id,
@@ -145,7 +157,7 @@ def create_appointment(
         "service_id": service_id,
         "scheduled_at": scheduled_at,
         "employee_id": employee_id,
-        "status": "confirmed",
+        "status": status,
     }
     if address:
         fila["is_home_visit"] = True
@@ -155,6 +167,16 @@ def create_appointment(
             fila["home_visit_fee"] = home_visit_fee
     response = supabase.table("appointments").insert(fila).execute()
     return response.data
+
+
+def update_appointment_status(appointment_id: str, status: str) -> dict | None:
+    """
+    Cambia el estado de una cita existente (ej. "pending_payment" ->
+    "confirmed" cuando Wompi aprueba el abono, o -> "cancelled" si el
+    link de pago vence sin pagar). Ver services/appointment_confirmation.py.
+    """
+    response = supabase.table("appointments").update({"status": status}).eq("id", appointment_id).execute()
+    return response.data[0] if response.data else None
 
 def get_business_by_whatsapp_phone_id(phone_number_id: str):
     """
