@@ -191,7 +191,14 @@ def _inferir_zona_por_geocodificacion(direccion: str, zonas: list[dict]) -> tupl
     return None, (localidades[0] if localidades else None)
 
 
-def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, mensajes: list) -> tuple[dict | None, str | None]:
+def _resolver_zona(
+    business_id: str,
+    direccion: str | None,
+    zona: str | None,
+    mensajes: list,
+    session_id: str | None = None,
+    client_phone: str | None = None,
+) -> tuple[dict | None, str | None]:
     """
     Politica de domicilios del negocio: valida que el lugar del cliente este
     dentro de las zonas donde se hacen domicilios y devuelve (zona, error).
@@ -205,6 +212,15 @@ def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, me
       en vez de exigir el substring exacto de antes. Un match solo
       "parecido" (no fuerte) NUNCA se acepta en silencio: el error le pide
       al bot que se lo confirme al cliente antes de continuar.
+    - Cuando el lugar del cliente SI se identifico con certeza (por nombre
+      exacto/alias, o por geocodificacion) pero NO esta entre las zonas
+      configuradas, se avisa al negocio en silencio (mismo mecanismo que
+      escalar_por_confusion: push + evento en tiempo real, el cliente nunca
+      se entera) para que un humano decida si hace una excepcion - el bot
+      igual le responde al cliente el mensaje normal de fuera de cobertura.
+      Esto NO aplica cuando todavia no se sabe en que zona esta el cliente
+      (se le esta pidiendo que aclare): ahi no hay nada que un humano deba
+      decidir todavia.
     """
     if not direccion or not direccion.strip():
         return None, None
@@ -217,6 +233,10 @@ def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, me
         direccion + " " + " ".join(str(m.content) for m in mensajes if getattr(m, "type", None) == "human")
     )
     listado = ", ".join(f"{z['name']} (recargo {_formato_precio_cop(z['fee'])})" for z in zonas)
+
+    def _avisar_negocio_fuera_de_cobertura() -> None:
+        if session_id:
+            _notificar_negocio_escalamiento(business_id, session_id, client_phone or "Un cliente")
 
     if zona and zona.strip():
         zona_normalizada = _normalizar(zona)
@@ -234,6 +254,7 @@ def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, me
             if mejor_zona and score >= _UMBRAL_ZONA_FUERTE:
                 elegida = mejor_zona
             else:
+                _avisar_negocio_fuera_de_cobertura()
                 return None, (
                     f"Ese lugar esta fuera de la zona de cobertura de domicilios. Zonas donde SI se llega: {listado}. "
                     "Explicaselo al cliente y ofrecele agendar en el local o en una de esas zonas."
@@ -279,6 +300,10 @@ def _resolver_zona(business_id: str, direccion: str | None, zona: str | None, me
                 # Ni el texto ni la zona geocodificada matchean ninguna
                 # zona: aqui si se usa el lugar geocodificado, como
                 # informacion adicional (no como unica fuente de verdad).
+                # A diferencia del "else" de abajo, aqui SI se identifico un
+                # lugar real (solo que no esta cubierto), asi que si aplica
+                # avisar al negocio.
+                _avisar_negocio_fuera_de_cobertura()
                 return None, (
                     f"Segun la direccion, el cliente podria estar en {lugar_geo}, que no esta entre las zonas de "
                     f"cobertura de domicilios. Confirmaselo y ofrecele agendar en el local o en: {listado}."
@@ -700,6 +725,7 @@ def pedir_confirmacion_cita(
     business_id: BusinessId,
     employee_id: EmployeeId,
     client_phone: ClientPhone,
+    session_id: SessionId,
     tool_call_id: Annotated[str, InjectedToolCallId],
     mensajes: Annotated[list, InjectedState("messages")],
     direccion: Annotated[
@@ -751,7 +777,7 @@ def pedir_confirmacion_cita(
     error_domicilio = _validar_domicilio(business_id, servicio, direccion, mensajes)
     zona_elegida = None
     if not error_domicilio:
-        zona_elegida, error_domicilio = _resolver_zona(business_id, direccion, zona, mensajes)
+        zona_elegida, error_domicilio = _resolver_zona(business_id, direccion, zona, mensajes, session_id, client_phone)
     if error_domicilio:
         return Command(update={"messages": [ToolMessage(content=error_domicilio, tool_call_id=tool_call_id)]})
 
@@ -859,7 +885,7 @@ def crear_cita(
     error_domicilio = _validar_domicilio(business_id, servicio, direccion, mensajes)
     zona_elegida = None
     if not error_domicilio:
-        zona_elegida, error_domicilio = _resolver_zona(business_id, direccion, zona, mensajes)
+        zona_elegida, error_domicilio = _resolver_zona(business_id, direccion, zona, mensajes, session_id, client_phone)
     if error_domicilio:
         return {"error": error_domicilio}
 
