@@ -622,6 +622,14 @@ def seleccionar_servicio(
             }
         )
 
+    aviso_domicilio = (
+        " Este servicio SI ofrece domicilio (offers_home_visit=true). ANTES de consultar horas "
+        "disponibles o pedir el dia, pregúntale EXPLICITAMENTE al cliente si prefiere la cita en el "
+        "local o a domicilio — no asumas el local por defecto ni sigas el flujo sin preguntar esto."
+        if servicio.get("offers_home_visit")
+        else ""
+    )
+
     return Command(
         update={
             "service_id": service_id,
@@ -629,7 +637,8 @@ def seleccionar_servicio(
                 ToolMessage(
                     content=(
                         f"Servicio seleccionado: {servicio['name']} "
-                        f"({servicio['duration_minutes']} min, {_formato_precio_cop(servicio['price'])})"
+                        f"({servicio['duration_minutes']} min, {_formato_precio_cop(servicio['price'])})."
+                        f"{aviso_domicilio}"
                     ),
                     tool_call_id=tool_call_id,
                 )
@@ -1005,8 +1014,27 @@ def cancelar_cita(
     appointment_id: Annotated[str, Field(description="ID de la cita a cancelar.")],
     business_id: BusinessId,
     client_phone: ClientPhone,
+    session_id: SessionId,
+    confirmar_a_pesar_del_pago: Annotated[
+        bool,
+        Field(
+            description="Dejala en False la primera vez. Si la cita tiene un abono/pago ya realizado, esta tool "
+            "no cancela nada la primera vez y en cambio te pide confirmar con el cliente. Solo si el cliente, "
+            "viendo esa advertencia, confirma explicitamente que aun asi quiere cancelar, vuelve a llamar esta "
+            "misma tool con este parametro en True para ejecutar la cancelacion real."
+        ),
+    ] = False,
 ) -> dict:
-    """Cancela una cita existente del cliente."""
+    """
+    Cancela una cita existente del cliente. Si el servicio de esa cita
+    requiere abono (ya fue pagado, porque una cita solo llega a estado
+    confirmada pasando por el pago), esta tool NO cancela de inmediato:
+    devuelve una advertencia que debes mostrarle al cliente tal cual,
+    explicando que ya hizo un pago y que la cancelacion podria requerir un
+    proceso de devolucion, y preguntandole si de verdad quiere continuar.
+    Solo cancela la cita real cuando el cliente confirme explicitamente
+    despues de leer esa advertencia (segundo llamado, confirmar_a_pesar_del_pago=True).
+    """
     if not client_phone:
         return {"error": "Necesito el numero de WhatsApp del cliente para poder cancelar. Pidelo y usa registrar_telefono_cliente."}
 
@@ -1014,9 +1042,28 @@ def cancelar_cita(
     if not cita:
         return {"error": "No encontre esa cita para este cliente."}
 
+    servicio_info = cita.get("services") or {}
+    tiene_pago = bool(servicio_info.get("requires_payment"))
+
+    if tiene_pago and not confirmar_a_pesar_del_pago:
+        return {
+            "requiere_confirmacion_por_pago": True,
+            "advertencia": (
+                "⚠️ Esta cita tiene un pago/abono ya realizado. Cancelarla puede requerir un proceso de "
+                "devolucion. ¿Estas seguro de que quieres cancelarla de todos modos?"
+            ),
+        }
+
     from services.db import cancel_appointment
 
     resultado = cancel_appointment(appointment_id, client_phone)
+
+    if tiene_pago:
+        # Cancelar una cita ya pagada siempre se avisa al negocio (no en
+        # silencio como escalar_por_confusion): puede necesitar coordinar
+        # una devolucion con el cliente, no es algo que el bot pueda
+        # resolver solo.
+        _notificar_negocio_escalamiento(business_id, session_id, cita.get("client_name") or client_phone)
 
     try:
         from services.push_notifications import enviar_notificacion_cita_cancelada
@@ -1025,7 +1072,7 @@ def cancelar_cita(
 
         business = get_business_by_id(business_id)
         fecha_hora_dt = datetime.fromisoformat(cita["scheduled_at"])
-        nombre_servicio = cita.get("services", {}).get("name", "su cita") if cita.get("services") else "su cita"
+        nombre_servicio = servicio_info.get("name", "su cita")
         enviar_notificacion_cita_cancelada(
             fcm_token=business.get("fcm_token") if business else None,
             nombre_cliente=cita.get("client_name") or "Cliente",
@@ -1045,14 +1092,40 @@ def cancelar_cita(
 @tool
 def reprogramar_cita(
     appointment_id: Annotated[str, Field(description="ID de la cita a reprogramar.")],
-    nueva_fecha_hora: Annotated[str, Field(description="Nueva fecha y hora en formato ISO 8601, ej: 2026-07-01T17:00:00")],
     business_id: BusinessId,
     client_phone: ClientPhone,
+    session_id: SessionId,
+    mensajes: Annotated[list, InjectedState("messages")],
+    nueva_fecha_hora: Annotated[
+        Optional[str],
+        Field(
+            description="Nueva fecha y hora en formato ISO 8601, ej: 2026-07-01T17:00:00. "
+            "Omitela si el cliente SOLO quiere cambiar entre local y domicilio sin cambiar la hora."
+        ),
+    ] = None,
+    direccion: Annotated[
+        Optional[str],
+        Field(description="Direccion nueva SI el cliente quiere que la cita pase a ser (o siga siendo) a domicilio. NUNCA la inventes."),
+    ] = None,
+    zona: Annotated[
+        Optional[str],
+        Field(description="Municipio/zona del domicilio (uno de los que devuelve consultar_zonas_domicilio). Solo junto con direccion."),
+    ] = None,
+    volver_al_local: Annotated[
+        bool,
+        Field(description="True SOLO si una cita que estaba a domicilio debe volver a ser en el local (quita la direccion). No la actives si la cita ya es en el local."),
+    ] = False,
 ) -> dict:
     """
-    Cambia la fecha y/u hora de una cita existente del cliente, manteniendo
-    el mismo servicio. Usa esto cuando el cliente pida mover, cambiar, o
-    reagendar una cita que ya tiene, en vez de cancelarla y crear una nueva.
+    Cambia la fecha/hora y/o la modalidad (local <-> domicilio) de una cita
+    existente del cliente, EN LA MISMA cita - NUNCA crea una cita nueva ni
+    para esto ni cuando el cliente pide "cambiar la de local a domicilio"
+    (eso tambien es reprogramar, no agendar de nuevo). Usa esta tool cuando
+    el cliente pida mover, cambiar de hora, o cambiar la modalidad de una
+    cita que ya tiene. Puedes pasar solo nueva_fecha_hora (misma modalidad),
+    solo direccion+zona o volver_al_local (misma hora, cambia modalidad), o
+    ambos a la vez. Primero usa consultar_citas_cliente si no sabes el
+    appointment_id.
     """
     if not client_phone:
         return {"error": "Necesito el numero de WhatsApp del cliente para reprogramar. Pidelo y usa registrar_telefono_cliente."}
@@ -1066,11 +1139,41 @@ def reprogramar_cita(
     duracion = cita_actual.get("services", {}).get("duration_minutes", 30) if cita_actual.get("services") else 30
     nombre_servicio = cita_actual.get("services", {}).get("name", "tu cita") if cita_actual.get("services") else "tu cita"
 
-    es_valida, mensaje_error = es_hora_valida(nueva_fecha_hora, empleado_id_cita, duracion)
+    # La modalidad (local/domicilio) solo se toca si el cliente pidio
+    # cambiarla explicitamente (direccion nueva, o volver_al_local); si no
+    # dijo nada de eso, la cita se reprograma tal cual estaba.
+    cambia_modalidad = bool((direccion and direccion.strip()) or volver_al_local)
+    is_home_visit = None
+    direccion_final = None
+    zona_nombre = None
+    zona_fee = 0.0
+
+    if cambia_modalidad and not volver_al_local:
+        servicios_empleado = get_employee_services(empleado_id_cita)
+        servicio = next((s for s in servicios_empleado if s["id"] == cita_actual.get("service_id")), None)
+
+        error_domicilio = _validar_domicilio(business_id, servicio, direccion, mensajes)
+        if error_domicilio:
+            return {"error": error_domicilio}
+
+        zona_elegida, error_zona = _resolver_zona(business_id, direccion, zona, mensajes, session_id, client_phone)
+        if error_zona:
+            return {"error": error_zona}
+
+        is_home_visit = True
+        direccion_final = direccion.strip()
+        zona_nombre = zona_elegida["name"] if zona_elegida else None
+        zona_fee = float(zona_elegida["fee"]) if zona_elegida else 0.0
+    elif volver_al_local:
+        is_home_visit = False
+
+    nueva_fecha_hora_final = nueva_fecha_hora or cita_actual["scheduled_at"]
+
+    es_valida, mensaje_error = es_hora_valida(nueva_fecha_hora_final, empleado_id_cita, duracion)
     if not es_valida:
         return {"error": mensaje_error}
 
-    nueva_fecha_hora_dt = datetime.fromisoformat(nueva_fecha_hora)
+    nueva_fecha_hora_dt = datetime.fromisoformat(nueva_fecha_hora_final)
 
     hay_choque, mensaje_choque = hay_choque_de_horario(
         business_id, empleado_id_cita, nueva_fecha_hora_dt, duracion, ignorar_appointment_id=appointment_id
@@ -1078,7 +1181,14 @@ def reprogramar_cita(
     if hay_choque:
         return {"error": mensaje_choque}
 
-    update_appointment_schedule(appointment_id, nueva_fecha_hora)
+    update_appointment_schedule(
+        appointment_id,
+        nueva_fecha_hora_final,
+        is_home_visit=is_home_visit,
+        address=direccion_final,
+        home_visit_zone=zona_nombre,
+        home_visit_fee=zona_fee,
+    )
 
     try:
         from services.push_notifications import enviar_notificacion_cita_reprogramada
@@ -1100,7 +1210,14 @@ def reprogramar_cita(
 
     emitir_evento_cita("appointment.updated", business_id, appointment_id)
 
-    return {"cita_reprogramada": True, "nueva_fecha_hora": nueva_fecha_hora}
+    resultado = {"cita_reprogramada": True, "nueva_fecha_hora": nueva_fecha_hora_final}
+    if cambia_modalidad:
+        resultado["es_domicilio_ahora"] = bool(is_home_visit)
+        if is_home_visit:
+            resultado["direccion"] = direccion_final
+            resultado["zona"] = zona_nombre
+            resultado["recargo_domicilio_cents"] = int(zona_fee * 100)
+    return resultado
 
 
 @tool

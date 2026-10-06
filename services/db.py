@@ -278,13 +278,17 @@ def get_client_appointments(business_id: str, client_phone: str):
 
 def get_appointment_by_id_and_phone(appointment_id: str, client_phone: str):
     """
-    Trae una cita (con el nombre y duracion del servicio) validando que
-    pertenezca al telefono dado, para cancelaciones y reprogramaciones.
-    Retorna None si no existe o no es de ese cliente.
+    Trae una cita (con nombre, duracion y si requiere abono del servicio)
+    validando que pertenezca al telefono dado, para cancelaciones y
+    reprogramaciones. requires_payment se usa para saber si la cita ya
+    tiene un pago real detras (ver agent/tools.py:cancelar_cita): una cita
+    "confirmed" de un servicio con requires_payment=True solo llega a ese
+    estado despues de que Wompi confirmo el pago, nunca antes. Retorna None
+    si no existe o no es de ese cliente.
     """
     response = (
         supabase.table("appointments")
-        .select("*, services(name, duration_minutes)")
+        .select("*, services(name, duration_minutes, requires_payment)")
         .eq("id", appointment_id)
         .eq("client_phone", client_phone)
         .execute()
@@ -313,11 +317,31 @@ def get_appointment_full(appointment_id: str):
     return None
 
 
-def update_appointment_schedule(appointment_id: str, nueva_fecha_hora: str):
-    """Actualiza la fecha/hora de una cita existente (reprogramacion)."""
+def update_appointment_schedule(
+    appointment_id: str,
+    nueva_fecha_hora: str,
+    is_home_visit: bool | None = None,
+    address: str | None = None,
+    home_visit_zone: str | None = None,
+    home_visit_fee: float | None = None,
+):
+    """
+    Actualiza la fecha/hora de una cita existente (reprogramacion). Los
+    parametros de domicilio son opcionales: se pasan cuando la
+    reprogramacion tambien cambia la modalidad (local <-> domicilio) de la
+    MISMA cita, en vez de dejarla igual - ver agent/tools.py:reprogramar_cita.
+    Si is_home_visit es None, la modalidad actual de la cita no se toca.
+    """
+    campos = {"scheduled_at": nueva_fecha_hora}
+    if is_home_visit is not None:
+        campos["is_home_visit"] = is_home_visit
+        campos["address"] = address
+        campos["home_visit_zone"] = home_visit_zone
+        campos["home_visit_fee"] = home_visit_fee or 0
+
     response = (
         supabase.table("appointments")
-        .update({"scheduled_at": nueva_fecha_hora})
+        .update(campos)
         .eq("id", appointment_id)
         .execute()
     )
