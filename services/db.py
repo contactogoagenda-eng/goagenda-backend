@@ -448,6 +448,31 @@ def set_employee_services(employee_id: str, service_ids: list[str]):
         supabase.table("employee_services").insert(filas).execute()
 
 
+def asignar_servicio_a_empleado_principal(business_id: str, service_id: str):
+    """
+    Liga un servicio recien creado al empleado principal (role='owner') del
+    negocio, para que el dueño no tenga que hacerlo a mano cada vez. Es
+    idempotente (upsert) y no debe tumbar la creacion del servicio.
+    """
+    try:
+        owner = (
+            supabase.table("employees")
+            .select("id")
+            .eq("business_id", business_id)
+            .eq("role", "owner")
+            .limit(1)
+            .execute()
+        )
+        if not owner.data:
+            return
+        supabase.table("employee_services").upsert(
+            {"employee_id": owner.data[0]["id"], "service_id": service_id},
+            on_conflict="employee_id,service_id",
+        ).execute()
+    except Exception as e:
+        print(f"No se pudo asignar el servicio {service_id} al empleado principal: {e}")
+
+
 def registrar_mensaje_entrante_whatsapp(business_id: str, client_phone: str):
     """
     Registra que un cliente le escribio a un negocio, actualizando el

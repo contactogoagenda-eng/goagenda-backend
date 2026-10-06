@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
 from typing import Optional
 
-from services.db import supabase
+from services.db import supabase, asignar_servicio_a_empleado_principal
 from services.auth import obtener_usuario_actual, verificar_acceso_negocio, verificar_dueno
 
 router = APIRouter(tags=["services"])
@@ -110,7 +110,10 @@ def create_service(data: ServiceCreate, user_id: str = Depends(obtener_usuario_a
         )
         .execute()
     )
-    return {"service": response.data[0] if response.data else None}
+    servicio = response.data[0] if response.data else None
+    if servicio:
+        asignar_servicio_a_empleado_principal(data.business_id, servicio["id"])
+    return {"service": servicio}
 
 
 @router.put("/services/{service_id}")
