@@ -49,6 +49,13 @@ def revisar_y_enviar_recordatorios():
         total_candidatas += len(citas_response.data)
 
         for cita in citas_response.data:
+            if not cita.get("client_phone"):
+                # Cita manual de un cliente sin WhatsApp (ver
+                # routes/manual_appointments.py) - no hay a donde mandar el
+                # recordatorio. Se deja reminder_sent=False (no se "envio"
+                # nada de verdad) pero se salta sin llamar la API de
+                # WhatsApp ni contarla como fallo.
+                continue
             try:
                 fecha_cita = datetime.fromisoformat(cita["scheduled_at"])
                 nombre_cliente = cita.get("client_name") or "Cliente"

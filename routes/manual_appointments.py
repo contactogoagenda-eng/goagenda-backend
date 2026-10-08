@@ -102,7 +102,12 @@ class CrearCitaManualInput(BaseModel):
     business_id: str
     employee_id: str
     client_name: str
-    client_phone: str
+    # Opcional: una cita manual puede ser de un cliente presencial sin
+    # WhatsApp (ej. llego caminando, o solo dio un fijo). "" (no None) para
+    # que encaje sin cambios con la columna client_phone de appointments,
+    # que es NOT NULL - ver tambien services/reminder_service.py, que
+    # salta estas citas en vez de intentar mandarles recordatorio.
+    client_phone: str = ""
     service_id: str
     fecha_hora: str  # formato ISO 8601, ej: 2026-07-01T15:00:00
     address: str | None = None  # solo si la cita es a domicilio
