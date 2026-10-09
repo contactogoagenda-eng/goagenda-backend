@@ -1,0 +1,5 @@
+# Dependencias solo para desarrollo/pruebas (no van en la imagen de Docker,
+# que instala requirements.txt). Uso: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==8.4.2
+pytest-cov==7.0.0

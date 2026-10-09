@@ -17,7 +17,18 @@ uvicorn main:app --reload
 
 Requires a `.env` file (not committed) with at least: `SUPABASE_URL`, `SUPABASE_KEY`, `DATABASE_URL` (direct Postgres connection — see README for the Supabase pooler gotcha), `OPENAI_API_KEY`, `WHATSAPP_TOKEN`, `VERIFY_TOKEN`, `BAILEYS_SERVICE_URL`, `BAILEYS_INTERNAL_API_KEY`, and either `FIREBASE_CREDENTIALS_JSON` (production, JSON pasted as a string) or a local `firebase-credentials.json` file for push notifications. Importing `routes.chat_routes` (transitively, `agent/graph.py`) opens a Postgres connection pool and runs `PostgresSaver.setup()` at module import time, so the app fails fast on startup if `DATABASE_URL` is missing or unreachable.
 
-There is no test suite, linter, or build step configured in this repo. This is a pure Python/FastAPI project — there is no Node.js code or tooling here. The Baileys WhatsApp connector (`@whiskeysockets/baileys`) is a separate Node service that lives outside this repo and is only ever talked to over HTTP via `BAILEYS_SERVICE_URL` (see `services/baileys_client.py`); do not add `package.json`/`node_modules` back to this repo for it.
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                 # todas las pruebas (~4 s)
+pytest --cov           # con cobertura; falla si baja de 90% (.coveragerc)
+pytest tests/test_tools.py -k zona   # un subconjunto
+```
+
+The local `.env` points at **production** (Supabase, OpenAI, WhatsApp, Wompi) and importing some modules has real side effects (`agent/graph.py` opens a Postgres pool; `main.py` seeds the super admin and starts the reminder scheduler). `tests/conftest.py` neutralizes all of that before any app code is imported: `load_dotenv` is disabled and every env var is fake, outbound sockets raise `RedBloqueadaEnPruebas` (a test missing a mock fails instead of reaching production), Supabase is an in-memory fake that really filters/projects (`tests/fakes.py:FakeSupabase` — seed with `db.sembrar(...)`, simulate outages with `db.fallar_en[tabla] = Exception(...)`, partial unique indexes with `db.agregar_unico(...)`), the LangGraph checkpointer is in-memory, and APScheduler is a no-op. Fixtures: `db` (autouse, reset per test), `cliente` (TestClient over the real `main.app`) and `como("user-id")` (Bearer headers resolved by the real auth dependency). Agent tests run the real graph with the LLM replaced by `tests/fakes.py:ModeloGuionado` (scripted `AIMessage`s). Never point tests at real services.
+
+There is no linter or build step configured in this repo. This is a pure Python/FastAPI project — there is no Node.js code or tooling here. The Baileys WhatsApp connector (`@whiskeysockets/baileys`) is a separate Node service that lives outside this repo and is only ever talked to over HTTP via `BAILEYS_SERVICE_URL` (see `services/baileys_client.py`); do not add `package.json`/`node_modules` back to this repo for it.
 
 To manually exercise the AI conversation flow, use the public chat endpoints directly (`routes/chat_routes.py`): `POST /chat/{business_id}/sessions` to get a `session_id`, then `POST /chat/{business_id}/sessions/{session_id}/messages`. No auth required — see the README's "Chat API" section for the full contract.
 

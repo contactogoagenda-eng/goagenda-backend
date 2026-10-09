@@ -1,0 +1,14 @@
+[run]
+source = agent, services, routes, core, main
+omit =
+    tests/*
+    venv/*
+
+[report]
+# Si la cobertura baja de aqui, `pytest --cov` falla.
+fail_under = 90
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:

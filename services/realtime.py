@@ -88,10 +88,14 @@ class GestorConexionesTiempoReal:
         if self._loop is None or not destinatarios:
             return
 
+        corrutina = self._difundir(business_id, mensaje)
         try:
-            asyncio.run_coroutine_threadsafe(self._difundir(business_id, mensaje), self._loop)
+            asyncio.run_coroutine_threadsafe(corrutina, self._loop)
         except RuntimeError:
-            pass
+            # Loop ya cerrado (ej. apagando el servidor): se descarta el envio
+            # cerrando la corrutina, para no dejar un "coroutine was never
+            # awaited" en los logs.
+            corrutina.close()
 
 
 gestor_tiempo_real = GestorConexionesTiempoReal()

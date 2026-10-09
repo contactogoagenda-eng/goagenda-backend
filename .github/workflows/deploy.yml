@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Test, Build and Deploy
 
 on:
   push:
@@ -8,7 +8,34 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
+  # Las pruebas corren primero: si alguna falla, o la cobertura baja de 90%
+  # (fail_under en .coveragerc), no se construye la imagen ni se despliega.
+  # No necesitan secretos ni el .env: tests/conftest.py usa variables falsas,
+  # bloquea la red y reemplaza Supabase/Postgres por dobles en memoria.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Misma version menor que la imagen de produccion (python:3.12-slim en el Dockerfile).
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Correr pruebas con cobertura
+        run: pytest --cov --cov-report=term-missing
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

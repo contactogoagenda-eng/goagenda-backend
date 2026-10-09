@@ -60,6 +60,49 @@ El servidor queda disponible en `http://localhost:8000`. Al arrancar tambien se 
 
 Documentacion interactiva de la API (Swagger UI) disponible en `http://localhost:8000/docs`.
 
+## Pruebas
+
+Las pruebas unitarias usan `pytest` y viven en `tests/`. Sus dependencias van aparte en `requirements-dev.txt` (no se instalan en la imagen de Docker de produccion):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Comandos:
+
+```bash
+# Correr todas las pruebas (~4 segundos)
+pytest
+
+# Con reporte de cobertura en la terminal (lineas sin cubrir incluidas).
+# Falla si la cobertura total baja de 90% (ver fail_under en .coveragerc)
+pytest --cov
+
+# Reporte de cobertura navegable en HTML (se genera en htmlcov/index.html)
+pytest --cov --cov-report=html
+
+# Un solo archivo
+pytest tests/test_tools.py
+
+# Solo las pruebas cuyo nombre contenga un texto
+pytest -k zona
+
+# Detenerse en la primera falla y mostrar el detalle completo
+pytest -x -vv
+```
+
+**En el pipeline** (`.github/workflows/deploy.yml`), cada push a `main` corre primero `pytest --cov`: si alguna prueba falla o la cobertura baja de 90%, no se construye la imagen ni se despliega.
+
+**Las pruebas no tocan nada real.** El `.env` local apunta a produccion (Supabase, OpenAI, WhatsApp, Wompi), asi que `tests/conftest.py`, antes de importar cualquier codigo de la app:
+
+- ignora el `.env` y usa variables de entorno falsas
+- bloquea la red: si a una prueba le falta un mock, falla con `RedBloqueadaEnPruebas` en vez de llegar a produccion
+- reemplaza Supabase por una base en memoria (`tests/fakes.py:FakeSupabase`)
+- reemplaza el checkpointer de Postgres del agente por uno en memoria
+- desactiva el scheduler de recordatorios
+
+Las pruebas del agente ejecutan el grafo real de LangGraph con las tools reales; solo el modelo de IA se reemplaza por respuestas guionadas (`tests/fakes.py:ModeloGuionado`). Ver la seccion "Tests" de `CLAUDE.md` para los fixtures disponibles (`db`, `cliente`, `como`).
+
 ## Chat API
 
 Endpoints publicos (sin autenticacion — el enlace es la unica "credencial") aislados por negocio, pensados para que un frontend de cliente final los consuma. El aislamiento entre negocios esta garantizado en dos capas: el `business_id` en la URL, y el `thread_id` interno del checkpointer (`business_id:session_id`), asi que un `session_id` jamas puede continuar la conversacion de otro negocio.
@@ -195,6 +238,7 @@ core/                  # configuracion compartida (settings del agente de chat)
 agent/                 # agente conversacional de LangGraph: estado, tools, prompt, grafo
 routes/                # un router por recurso (chat, webhook, negocios, servicios, horarios, realtime, etc)
 services/               # logica de negocio: Supabase, WhatsApp, Baileys, push, realtime (WS), uso de IA, scheduling
+tests/                  # pruebas unitarias (pytest); conftest.py aisla todo de los servicios reales
 ```
 
 Para una guia mas detallada de la arquitectura (flujo del agente, aislamiento por negocio, modelo de auth, etc), ver `CLAUDE.md`.

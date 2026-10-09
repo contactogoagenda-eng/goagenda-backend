@@ -20,3 +20,7 @@ package-lock.json
 # Editor
 .vscode/
 .idea/
+# Pruebas
+.coverage
+.pytest_cache/
+htmlcov/
