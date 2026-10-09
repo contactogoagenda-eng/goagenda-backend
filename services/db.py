@@ -370,9 +370,12 @@ def get_employee_by_id(employee_id: str):
 def create_employee(business_id: str, user_id: str, name: str | None, role: str) -> dict:
     """
     Crea un empleado (role='owner' para el dueño al reclamar su negocio, o
-    'staff' para un empleado normal) y le siembra un horario por defecto
-    (lunes a sabado 9am-7pm, domingo cerrado) para que ya pueda recibir
-    citas; el dueño lo ajusta despues desde la app.
+    'staff' para un empleado normal) y le siembra un horario para que ya
+    pueda recibir citas. Regla de negocio: el empleado principal (owner)
+    hereda SIEMPRE el horario del negocio (business_hours) - ver
+    sincronizar_horario_empleado_principal. Un empleado normal arranca con
+    un horario por defecto (lunes a sabado 9am-7pm, domingo cerrado) que
+    el dueño ajusta despues desde la app.
     """
     response = (
         supabase.table("employees")
@@ -380,6 +383,9 @@ def create_employee(business_id: str, user_id: str, name: str | None, role: str)
         .execute()
     )
     empleado = response.data[0]
+
+    if role == "owner" and sincronizar_horario_empleado_principal(business_id):
+        return empleado
 
     try:
         filas_horario = [
@@ -398,6 +404,69 @@ def create_employee(business_id: str, user_id: str, name: str | None, role: str)
         print(f"No se pudo crear el horario por defecto del empleado {empleado['id']}: {e}")
 
     return empleado
+
+
+def get_owner_employee(business_id: str) -> dict | None:
+    """El empleado principal (role='owner') de un negocio, o None si todavia no tiene."""
+    response = (
+        supabase.table("employees")
+        .select("*")
+        .eq("business_id", business_id)
+        .eq("role", "owner")
+        .limit(1)
+        .execute()
+    )
+    return response.data[0] if response.data else None
+
+
+_CAMPOS_HORARIO = ["is_open", "opening_time", "closing_time", "lunch_start", "lunch_end"]
+
+
+def sincronizar_horario_empleado_principal(business_id: str, dias: list[str] | None = None) -> bool:
+    """
+    Regla de negocio: el empleado principal (owner) hereda el horario del
+    negocio. Copia business_hours -> employee_hours del owner (todos los
+    dias, o solo los de `dias`). Hace falta porque la disponibilidad del
+    chat y de las citas manuales se calcula con employee_hours, mientras
+    que la pestaña "Horario" del panel edita business_hours: si se
+    desincronizan, el chat deja de ofrecer horas que el dueño si
+    configuro. Devuelve False si el negocio no tiene owner o no tiene
+    horario del negocio que copiar (el caller decide el fallback).
+    """
+    owner = get_owner_employee(business_id)
+    if not owner:
+        return False
+
+    dias_a_sincronizar = dias or (DIAS_VALIDOS_HORARIO + ["sun"])
+    horario_negocio = (
+        supabase.table("business_hours")
+        .select("*")
+        .eq("business_id", business_id)
+        .in_("day", dias_a_sincronizar)
+        .execute()
+        .data
+    )
+    if not horario_negocio:
+        return False
+
+    # Un dia sin fila en business_hours se muestra como cerrado en el panel
+    # (y asi lo describe el prompt del chat): el principal lo hereda cerrado,
+    # en vez de quedarse con lo que tuviera antes.
+    por_dia = {fila["day"]: fila for fila in horario_negocio}
+    filas = [
+        {
+            "employee_id": owner["id"],
+            "day": dia,
+            **(
+                {c: por_dia[dia].get(c) for c in _CAMPOS_HORARIO}
+                if dia in por_dia
+                else {c: (False if c == "is_open" else None) for c in _CAMPOS_HORARIO}
+            ),
+        }
+        for dia in dias_a_sincronizar
+    ]
+    supabase.table("employee_hours").upsert(filas, on_conflict="employee_id,day").execute()
+    return True
 
 
 def update_employee(employee_id: str, campos: dict) -> dict | None:

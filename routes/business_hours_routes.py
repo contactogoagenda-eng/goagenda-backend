@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from postgrest.exceptions import APIError
 
-from services.db import supabase
+from services.db import sincronizar_horario_empleado_principal, supabase
 from services.auth import obtener_usuario_actual, verificar_dueno
 
 router = APIRouter(tags=["business-hours"])
@@ -70,5 +70,10 @@ def update_business_hours(data: DayHourUpdate, user_id: str = Depends(obtener_us
                 detail="Sin permisos para actualizar business_hours (RLS). Configura SUPABASE_SERVICE_ROLE_KEY en el backend o ajusta la policy de Supabase.",
             )
         raise
+
+    # Regla de negocio: el empleado principal hereda el horario del negocio.
+    # Sin esto, el cambio se guardaba pero el chat (que calcula horas libres
+    # con employee_hours) lo ignoraba.
+    sincronizar_horario_empleado_principal(data.business_id, dias=[data.day])
 
     return {"business_hour": response.data[0] if response.data else None}

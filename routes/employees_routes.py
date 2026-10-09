@@ -86,6 +86,16 @@ def actualizar_horario_empleado(employee_id: str, data: EmployeeHourUpdate, user
     if data.day not in DIAS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Dia invalido. Usa uno de: {DIAS_VALIDOS}")
 
+    # Regla de negocio: el empleado principal hereda el horario del negocio
+    # (ver services/db.py:sincronizar_horario_empleado_principal) - si se
+    # pudiera editar aparte, se volveria a desincronizar.
+    empleado = get_employee_by_id(employee_id)
+    if empleado and empleado.get("role") == "owner":
+        raise HTTPException(
+            status_code=400,
+            detail="El horario del empleado principal es el mismo del negocio. Cambialo en la seccion Horario.",
+        )
+
     campos = {"is_open": data.is_open, "lunch_start": data.lunch_start, "lunch_end": data.lunch_end}
     if data.opening_time:
         campos["opening_time"] = data.opening_time

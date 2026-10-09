@@ -1,3 +1,4 @@
+import re
 import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -14,7 +15,14 @@ from agent.state import AgentState
 from agent.tools import _normalizar, TOOLS
 from core.settings import CHAT_MODEL_NAME, DATABASE_URL, OPENAI_API_KEY
 from services.ai_usage_tracking import registrar_uso
-from services.db import get_business_by_id, get_employees, get_employee_services, supabase as client_supabase
+from services.db import (
+    get_business_by_id,
+    get_employee_services,
+    get_employees,
+    get_home_visit_zones,
+    get_services,
+    supabase as client_supabase,
+)
 from services.scheduling import DIAS_SEMANA_ES, ahora_local
 from services.whatsapp import construir_mensaje_contacto_humano
 
@@ -62,9 +70,51 @@ _pool = ConnectionPool(
 _checkpointer = PostgresSaver(_pool)
 _checkpointer.setup()
 
-_model = ChatOpenAI(
-    model=CHAT_MODEL_NAME, api_key=OPENAI_API_KEY, temperature=LLM_TEMPERATURE, max_retries=3
-).bind_tools(TOOLS)
+_llm = ChatOpenAI(model=CHAT_MODEL_NAME, api_key=OPENAI_API_KEY, temperature=LLM_TEMPERATURE, max_retries=3)
+_model = _llm.bind_tools(TOOLS)
+# Mismo modelo, pero obligado a llamar consultar_servicios_disponibles: se
+# usa solo cuando _precios_no_respaldados detecta que la respuesta normal
+# menciono precios que no existen (ver _agent_node).
+_model_forzar_servicios = _llm.bind_tools(TOOLS, tool_choice="consultar_servicios_disponibles")
+
+_PATRON_PRECIO = re.compile(r"\$\s?(\d{1,3}(?:[.,]\d{3})+|\d+)")
+_PATRON_NUMERO = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _a_entero(texto: str) -> int | None:
+    """
+    '15.000' / '15,000' / '15000' / '15000.0' -> 15000. Los grupos de miles
+    siempre tienen 3 digitos; un final de 1-2 digitos tras el separador es
+    la parte decimal (ej. el '.0' de un float) y se descarta.
+    """
+    limpio = re.sub(r"[.,]\d{1,2}$", "", texto)
+    digitos = re.sub(r"[.,]", "", limpio)
+    return int(digitos) if digitos.isdigit() else None
+
+
+def _precios_no_respaldados(texto: str, mensajes: list, catalogo: list[dict], business_id: str) -> list[int]:
+    """
+    Precios ("$15.000") que el modelo escribio en su respuesta y que no salen
+    de ningun dato real: ni del catalogo de servicios, ni de recargos de
+    domicilio (o precio + recargo), ni de lo que devolvieron las tools en
+    esta conversacion (resumenes, abonos en centavos, etc). Una lista no
+    vacia significa que esta inventando (ej. un saludo con servicios y
+    precios que no existen, sin haber consultado nada).
+    """
+    mencionados = {_a_entero(m) for m in _PATRON_PRECIO.findall(texto)} - {None}
+    if not mencionados:
+        return []
+
+    precios = {int(round(float(s["price"]))) for s in catalogo if s.get("price") is not None}
+    recargos = {int(round(float(z["fee"]))) for z in get_home_visit_zones(business_id) if z.get("fee") is not None}
+    validos = precios | recargos | {p + r for p in precios for r in recargos} | {0}
+    for m in mensajes:
+        if getattr(m, "type", None) == "tool":
+            for numero in _PATRON_NUMERO.findall(str(m.content)):
+                valor = _a_entero(numero)
+                if valor is not None:
+                    validos.update({valor, valor // 100})
+    return sorted(mencionados - validos)
 
 
 def _construir_horario_texto(business_id: str) -> str:
@@ -135,6 +185,7 @@ def _agent_node(state: AgentState) -> dict:
         }
         for e in get_employees(state["business_id"])
     ]
+    catalogo = get_employee_services(state["employee_id"]) if state.get("employee_id") else get_services(state["business_id"])
     system = build_system_prompt(
         business,
         horario_texto,
@@ -145,39 +196,76 @@ def _agent_node(state: AgentState) -> dict:
         state.get("employee_fijo", False),
         state.get("service_id"),
         state.get("escalado", False),
+        catalogo=catalogo,
     )
 
-    historial = _historial_valido_para_modelo(state["messages"])
+    entrada = [SystemMessage(content=system)] + _historial_valido_para_modelo(state["messages"])
 
-    # Reintenta hasta LLM_MAX_INTENTOS veces antes de rendirse: la falla
-    # observada en produccion (un solo intento fallido justo despues de
-    # que el cliente dio su nombre y numero) se resolvio sola al repetir
-    # el mismo mensaje segundos despues, señal de que era transitoria
-    # (timeout/hiccup de red), no un error real de la solicitud.
+    response = _invocar_modelo(_model, entrada, state["business_id"])
+    if response is None:
+        mensaje = MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(business)
+        return {"messages": [AIMessage(content=mensaje)]}
+
+    # Red de seguridad contra servicios/precios inventados: si la respuesta
+    # final (sin tool calls) menciona precios que no salen de ningun dato
+    # real, se descarta y se obliga al modelo a consultar los servicios
+    # reales primero - el grafo vuelve a pasar por aqui con el resultado de
+    # la tool y responde con datos verdaderos. Solo se fuerza una vez por
+    # turno (si ya consulto servicios despues del ultimo mensaje del
+    # cliente, no se vuelve a forzar, para no entrar en un ciclo).
+    if not getattr(response, "tool_calls", None) and not _consulto_servicios_en_este_turno(state["messages"]):
+        inventados = _precios_no_respaldados(str(response.content), state["messages"], catalogo, state["business_id"])
+        if inventados:
+            print(
+                f"[anti-alucinacion] negocio={state['business_id']} precios sin respaldo={inventados}; "
+                f"se descarta la respuesta y se fuerza consultar_servicios_disponibles"
+            )
+            forzada = _invocar_modelo(_model_forzar_servicios, entrada, state["business_id"])
+            if forzada is not None and getattr(forzada, "tool_calls", None):
+                response = forzada
+
+    return {"messages": [response]}
+
+
+def _consulto_servicios_en_este_turno(mensajes: list) -> bool:
+    """True si despues del ultimo mensaje del cliente ya se llamo consultar_servicios_disponibles."""
+    for m in reversed(mensajes):
+        if getattr(m, "type", None) == "human":
+            return False
+        if getattr(m, "type", None) == "tool" and getattr(m, "name", None) == "consultar_servicios_disponibles":
+            return True
+    return False
+
+
+def _invocar_modelo(modelo, entrada: list, business_id: str):
+    """
+    Invoca el modelo y registra el consumo de tokens. Reintenta hasta
+    LLM_MAX_INTENTOS veces antes de rendirse (devuelve None): la falla
+    observada en produccion (un solo intento fallido justo despues de que
+    el cliente dio su nombre y numero) se resolvio sola al repetir el mismo
+    mensaje segundos despues, señal de que era transitoria (timeout/hiccup
+    de red), no un error real de la solicitud.
+    """
     response = None
     for intento in range(1, LLM_MAX_INTENTOS + 1):
         try:
-            response = _model.invoke([SystemMessage(content=system)] + historial)
+            response = modelo.invoke(entrada)
             break
         except Exception as e:
             print(f"Error invocando al modelo de IA (intento {intento}/{LLM_MAX_INTENTOS}): {e}")
             if intento < LLM_MAX_INTENTOS:
                 time.sleep(LLM_ESPERA_ENTRE_INTENTOS_SEGUNDOS)
 
-    if response is None:
-        mensaje = MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(business)
-        return {"messages": [AIMessage(content=mensaje)]}
-
-    usage = getattr(response, "usage_metadata", None) or {}
-    if usage:
-        registrar_uso(
-            state["business_id"],
-            usage.get("input_tokens", 0),
-            usage.get("output_tokens", 0),
-            usage.get("total_tokens", 0),
-        )
-
-    return {"messages": [response]}
+    if response is not None:
+        usage = getattr(response, "usage_metadata", None) or {}
+        if usage:
+            registrar_uso(
+                business_id,
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+                usage.get("total_tokens", 0),
+            )
+    return response
 
 
 def _build_graph():
