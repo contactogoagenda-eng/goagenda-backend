@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent.graph import MENSAJE_NEGOCIO_NO_DISPONIBLE, enviar_mensaje, enviar_respuesta_humana, obtener_historial
 from services.auth import obtener_usuario_actual, verificar_acceso_negocio
@@ -43,6 +43,20 @@ def _negocio_habilitado(business: dict) -> bool:
     )
 
 
+def _historial_o_503(business_id: str, session_id: str) -> tuple[list, list | None]:
+    """
+    obtener_historial lee el checkpointer en Postgres. Si la base falla (ej.
+    sin conexiones libres en el pooler) se responde 503 en vez de un 500
+    crudo: el widget lo trata como algo temporal y conserva la sesion del
+    cliente (antes la borraba y la conversacion se perdia).
+    """
+    try:
+        return obtener_historial(business_id, session_id)
+    except Exception as e:
+        print(f"No se pudo leer el historial del chat {business_id}:{session_id}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=503, detail="Historial temporalmente no disponible")
+
+
 def _validar_session_id(session_id: str) -> str:
     try:
         return str(uuid.UUID(session_id))
@@ -65,6 +79,10 @@ class CreateSessionResponse(BaseModel):
 
 class ChatMessageInput(BaseModel):
     mensaje: str
+    # Id que genera el widget por cada mensaje (y que reutiliza si reintenta
+    # el envio): hace el envio idempotente, ver agent/graph.py:enviar_mensaje.
+    # Opcional para no romper clientes viejos del widget que no lo mandan.
+    client_message_id: str | None = Field(default=None, max_length=64)
 
 
 class ChatOption(BaseModel):
@@ -132,7 +150,9 @@ def enviar_mensaje_chat(business_id: str, session_id: str, data: ChatMessageInpu
     if not _negocio_habilitado(business):
         return ChatMessageResponse(respuesta=MENSAJE_NEGOCIO_NO_DISPONIBLE)
 
-    respuesta, opciones = enviar_mensaje(business_id, session_id, data.mensaje)
+    respuesta, opciones = enviar_mensaje(
+        business_id, session_id, data.mensaje, client_message_id=data.client_message_id
+    )
     return ChatMessageResponse(respuesta=respuesta, opciones=opciones)
 
 
@@ -141,7 +161,7 @@ def obtener_historial_chat(business_id: str, session_id: str):
     """Historial de una sesion (para recargar el chat si el cliente refresca la pagina)."""
     _obtener_negocio_o_404(business_id)
     session_id = _validar_session_id(session_id)
-    historial, opciones = obtener_historial(business_id, session_id)
+    historial, opciones = _historial_o_503(business_id, session_id)
     return ChatHistoryResponse(session_id=session_id, mensajes=historial, opciones=opciones)
 
 
@@ -181,7 +201,9 @@ def enviar_mensaje_chat_empleado(business_id: str, employee_id: str, session_id:
     if not _negocio_habilitado(business):
         return ChatMessageResponse(respuesta=MENSAJE_NEGOCIO_NO_DISPONIBLE)
 
-    respuesta, opciones = enviar_mensaje(business_id, session_id, data.mensaje, employee_id=employee_id)
+    respuesta, opciones = enviar_mensaje(
+        business_id, session_id, data.mensaje, employee_id=employee_id, client_message_id=data.client_message_id
+    )
     return ChatMessageResponse(respuesta=respuesta, opciones=opciones)
 
 
@@ -190,7 +212,7 @@ def obtener_historial_chat_empleado(business_id: str, employee_id: str, session_
     _obtener_negocio_o_404(business_id)
     _obtener_empleado_o_404(business_id, employee_id)
     session_id = _validar_session_id(session_id)
-    historial, opciones = obtener_historial(business_id, session_id)
+    historial, opciones = _historial_o_503(business_id, session_id)
     return ChatHistoryResponse(session_id=session_id, mensajes=historial, opciones=opciones)
 
 

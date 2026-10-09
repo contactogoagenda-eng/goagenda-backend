@@ -20,9 +20,12 @@ def build_system_prompt(
     # correcta a mano. Ver tambien la validacion de precios en
     # agent/graph.py:_precios_no_respaldados.
     if catalogo:
-        catalogo_texto = "\n".join(
-            f"- {s['name']} - {s['duration_minutes']} min - {_formato_precio(s['price'])}" for s in catalogo
-        )
+        # Solo nombres, a proposito: con duracion y precio aqui el modelo
+        # dejaba de llamar consultar_servicios_disponibles (0 de 4 saludos en
+        # pruebas reales) y el cliente perdia los botones de seleccion
+        # rapida. Con solo los nombres sabe que existe (no inventa) pero
+        # necesita la tool para mostrar los detalles.
+        catalogo_texto = "\n".join(f"- {s['name']}" for s in catalogo)
     else:
         catalogo_texto = "(este negocio todavia no tiene servicios activos)"
 
@@ -131,9 +134,9 @@ REGLAS DE EXACTITUD — NUNCA INVENTES NI ASUMAS DATOS
 ===================================================================
 - REGLA CRITICA: nunca respondas sobre servicios, precios, horarios o disponibilidad usando informacion que recuerdes de mensajes anteriores. SIEMPRE debes llamar a la tool correspondiente (consultar_servicios_disponibles, consultar_horas_disponibles) en CADA mensaje donde el cliente pregunte por eso, sin excepcion, incluso si ya la consultaste antes en la misma conversacion.
 - Solo ofrece servicios que existan realmente, consultalos con la tool correspondiente. Nunca inventes servicios ni precios.
-- CATALOGO REAL DE SERVICIOS (estos son los UNICOS servicios que existen, con su duracion y precio exactos; si algo no esta en esta lista, NO existe y no lo puedes ofrecer ni inventar parecidos):
+- NOMBRES DE LOS SERVICIOS QUE EXISTEN (los UNICOS; si algo no esta en esta lista, NO existe y no lo puedes ofrecer ni inventar parecidos):
 {catalogo_texto}
-  Aun asi, cuando muestres servicios llama consultar_servicios_disponibles (ella le da al cliente los botones de seleccion rapida), y nunca menciones un servicio o un precio que no aparezca aqui.
+  Aqui solo estan los nombres: para mostrar servicios, su duracion o su precio SIEMPRE llama consultar_servicios_disponibles (ademas es la que le da al cliente los botones de seleccion rapida). Nunca escribas una duracion o un precio de memoria.
 - REGLA CRITICA: nunca inventes ni asumas datos que el cliente no te dio. Si todavia no te dijo el DIA para la cita, preguntaselo (ej: "¿para que dia te gustaria?") ANTES de consultar horas: no elijas una fecha por tu cuenta. Tampoco inventes su numero de WhatsApp ni su nombre: si no los tienes, pideselos.
 - REGLA CRITICA: nunca digas que una cita quedo "agendada", "confirmada" o similar a menos que hayas llamado la tool crear_cita en ESE MISMO turno y haya devuelto cita_creada (sin "error"). Si no llamaste la tool, la tool devolvio un error, o devolvio pago_pendiente en vez de cita_creada (ver la regla de pagos mas abajo), NO afirmes que la cita existe todavia.
 - REGLA CRITICA: las horas que le muestras al cliente pueden ser solo una muestra corta de las horas_disponibles reales (por ejemplo las primeras 5). Que una hora NO este en tu muestra NO significa que no este disponible. Cuando el cliente pida una hora concreta, NUNCA le digas que no esta disponible basandote en la muestra que le mostraste: llama consultar_horas_disponibles para ese dia y solo di que no esta disponible si esa hora realmente NO aparece en horas_disponibles. Si si aparece, sigue el flujo normal (pedir_confirmacion_cita). Cuando el cliente elija una hora, NO decidas tu si esta disponible: llama directamente pedir_confirmacion_cita, que valida contra el sistema y te dira si no se puede.
@@ -198,11 +201,3 @@ FORMATO Y TONO DE RESPUESTA
   ✅ Listo! Quedaste agendado para *Corte de cabello* el *martes 24 de junio a las 3:00 pm*.
 - Cuando informes que una hora no esta disponible o hay un error, usa un tono amable, puedes usar un emoji como 🙏 o 😊 al pedir otra opcion, sin sonar robotico.
 """.strip()
-
-
-def _formato_precio(precio) -> str:
-    """'$15.000' - mismo formato que agent/tools.py:_formato_precio_cop (este modulo no depende de las tools)."""
-    try:
-        return f"${int(round(float(precio))):,}".replace(",", ".")
-    except (TypeError, ValueError):
-        return "$0"

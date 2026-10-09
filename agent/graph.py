@@ -13,7 +13,14 @@ from psycopg_pool import ConnectionPool
 from agent.prompts import build_system_prompt
 from agent.state import AgentState
 from agent.tools import _normalizar, TOOLS
-from core.settings import CHAT_MODEL_NAME, DATABASE_URL, OPENAI_API_KEY
+from core.settings import (
+    CHAT_MODEL_NAME,
+    DATABASE_URL,
+    DB_POOL_MAX_SIZE,
+    DB_POOL_MIN_SIZE,
+    DB_POOL_TIMEOUT,
+    OPENAI_API_KEY,
+)
 from services.ai_usage_tracking import registrar_uso
 from services.db import (
     get_business_by_id,
@@ -61,11 +68,23 @@ _TOOLS_CON_OPCIONES = {
 # patron que el singleton `supabase` de services/db.py). setup() crea las
 # tablas propias del checkpointer (checkpoints, checkpoint_writes, etc) la
 # primera vez que corre; en corridas siguientes es un no-op seguro.
+#
+# Tamaño chico y configurable (ver core/settings.py): el pooler de Supabase
+# admite 15 clientes en total entre todos los procesos, y con el default de
+# 4-10 conexiones por proceso se agotaba. check_connection verifica cada
+# conexion antes de entregarla y descarta las que la red o el pooler
+# cerraron mientras estaban inactivas (antes se entregaban sin revisar y
+# la primera peticion tras un rato sin trafico podia fallar). max_idle mas
+# corto tambien evita guardar conexiones inactivas que nadie usa.
 _pool = ConnectionPool(
     conninfo=DATABASE_URL,
     kwargs={"autocommit": True, "row_factory": dict_row},
     open=True,
-    max_size=10,
+    min_size=DB_POOL_MIN_SIZE,
+    max_size=DB_POOL_MAX_SIZE,
+    timeout=DB_POOL_TIMEOUT,
+    max_idle=300,
+    check=ConnectionPool.check_connection,
 )
 _checkpointer = PostgresSaver(_pool)
 _checkpointer.setup()
@@ -214,10 +233,20 @@ def _agent_node(state: AgentState) -> dict:
     # turno (si ya consulto servicios despues del ultimo mensaje del
     # cliente, no se vuelve a forzar, para no entrar en un ciclo).
     if not getattr(response, "tool_calls", None) and not _consulto_servicios_en_este_turno(state["messages"]):
-        inventados = _precios_no_respaldados(str(response.content), state["messages"], catalogo, state["business_id"])
-        if inventados:
+        texto = str(response.content)
+        inventados = _precios_no_respaldados(texto, state["messages"], catalogo, state["business_id"])
+        listados = _servicios_mencionados(texto, catalogo)
+        # Enumerar 2+ servicios es mostrar el menu: tiene que pasar por la
+        # tool, que es la que da los botones de seleccion rapida y los
+        # datos verdaderos de duracion/precio. Excepto si esta listando
+        # EMPLEADOS (cada uno con sus servicios): eso es elegir con quien,
+        # y forzar la tool de servicios ahi desviaria la conversacion.
+        nombres_empleados = [_normalizar(e["name"]) for e in empleados if e.get("name") and e["name"] != "Sin nombre"]
+        lista_empleados = sum(1 for n in nombres_empleados if n in _normalizar(texto)) >= 2
+        if inventados or (len(listados) >= 2 and not lista_empleados):
+            motivo = f"precios sin respaldo={inventados}" if inventados else f"lista servicios sin consultar={listados}"
             print(
-                f"[anti-alucinacion] negocio={state['business_id']} precios sin respaldo={inventados}; "
+                f"[anti-alucinacion] negocio={state['business_id']} {motivo}; "
                 f"se descarta la respuesta y se fuerza consultar_servicios_disponibles"
             )
             forzada = _invocar_modelo(_model_forzar_servicios, entrada, state["business_id"])
@@ -225,6 +254,12 @@ def _agent_node(state: AgentState) -> dict:
                 response = forzada
 
     return {"messages": [response]}
+
+
+def _servicios_mencionados(texto: str, catalogo: list[dict]) -> list[str]:
+    """Nombres del catalogo que aparecen en el texto (sin importar tildes ni mayusculas)."""
+    texto_normalizado = _normalizar(texto)
+    return [s["name"] for s in catalogo if s.get("name") and _normalizar(s["name"]) in texto_normalizado]
 
 
 def _consulto_servicios_en_este_turno(mensajes: list) -> bool:
@@ -356,8 +391,43 @@ def _extraer_opciones(
     return None
 
 
+MENSAJE_PROCESANDO = "Estoy terminando de procesar tu mensaje anterior 🙏 Dame un momento y vuelve a escribirme."
+
+
+def _mensaje_error_tecnico(business_id: str) -> str:
+    """
+    MENSAJE_ERROR_TECNICO + como contactar al negocio. Si hasta eso falla
+    (ej. Supabase tambien caido), devuelve solo el mensaje base: este helper
+    se usa justamente en los caminos de error y no puede lanzar excepciones
+    (si lanzara, el endpoint responderia 500 y el widget mostraria "No se
+    pudo enviar el mensaje" en vez de una respuesta).
+    """
+    try:
+        return MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(get_business_by_id(business_id))
+    except Exception as e:
+        print(f"No se pudo armar el mensaje de contacto del negocio {business_id}: {e}")
+        return MENSAJE_ERROR_TECNICO
+
+
+def _respuesta_de_turno(mensajes: list, desde: int, ultimas_opciones, service_id, employee_id) -> tuple[str, list[dict] | None]:
+    """(texto, opciones) de la respuesta del asistente en los mensajes posteriores a `desde`."""
+    mensajes_nuevos = mensajes[desde:]
+    respuesta_texto = next(
+        (m.content for m in reversed(mensajes_nuevos) if isinstance(m, AIMessage) and m.content), ""
+    )
+    textos_cliente = [str(m.content) for m in mensajes if isinstance(m, HumanMessage)]
+    opciones = _extraer_opciones(
+        mensajes_nuevos, ultimas_opciones, service_id, employee_id, respuesta_texto, textos_cliente
+    )
+    return respuesta_texto, opciones
+
+
 def enviar_mensaje(
-    business_id: str, session_id: str, mensaje: str, employee_id: str | None = None
+    business_id: str,
+    session_id: str,
+    mensaje: str,
+    employee_id: str | None = None,
+    client_message_id: str | None = None,
 ) -> tuple[str, list[dict] | None]:
     """
     Manda un mensaje del cliente al agente y devuelve (respuesta_en_texto,
@@ -365,56 +435,84 @@ def enviar_mensaje(
     de un empleado), se manda en CADA invocacion del grafo, igual que
     business_id: asi queda fijo de forma confiable sin depender de que el
     modelo no intente cambiarlo.
+
+    client_message_id (opcional, lo genera el widget) hace el envio
+    idempotente: si la respuesta se pierde en el camino (red, timeout) y el
+    widget reintenta con el mismo id, se devuelve la respuesta que ya se
+    habia generado en vez de procesar el mensaje otra vez - sin esto, un
+    reintento de un "Si" podia, por ejemplo, intentar agendar dos veces.
+
+    Nunca lanza excepciones: cualquier falla (incluida la base de datos del
+    checkpointer) se convierte en un mensaje amable dentro del chat. Antes
+    GRAPH.get_state estaba fuera del try, y si el pool de conexiones no
+    podia dar una conexion el endpoint respondia 500 y el widget mostraba
+    "No se pudo enviar el mensaje".
     """
     config = _thread_config(business_id, session_id)
-    snapshot_previo = GRAPH.get_state(config)
-    mensajes_previos = len(snapshot_previo.values.get("messages", [])) if snapshot_previo and snapshot_previo.values else 0
-
-    entrada = {"messages": [HumanMessage(content=mensaje)], "business_id": business_id, "session_id": session_id}
-    if employee_id:
-        entrada["employee_id"] = employee_id
-        entrada["employee_fijo"] = True
-
-    if not snapshot_previo or not snapshot_previo.values:
-        # Primer turno de este thread: varias tools (transferir_a_equipo,
-        # escalar_por_confusion, crear_cita, consultar_servicios_disponibles,
-        # etc.) leen client_phone/employee_id via InjectedState, que lanza
-        # KeyError si esa clave nunca se escribio en el estado - ej. el
-        # cliente pide hablar con un asesor antes de dar su numero, o
-        # pregunta por servicios antes de elegir empleado en el chat
-        # general. setdefault no pisa el employee_id real si ya se puso
-        # arriba (chat de un empleado fijo).
-        entrada.setdefault("client_phone", None)
-        entrada.setdefault("employee_id", None)
 
     try:
+        snapshot_previo = GRAPH.get_state(config)
+        valores_previos = snapshot_previo.values if snapshot_previo and snapshot_previo.values else {}
+        mensajes_anteriores = valores_previos.get("messages", [])
+
+        if client_message_id:
+            indice = next(
+                (i for i, m in enumerate(mensajes_anteriores) if isinstance(m, HumanMessage) and m.id == client_message_id),
+                None,
+            )
+            if indice is not None:
+                print(f"[chat] reintento del mensaje {client_message_id} (thread {business_id}:{session_id}): no se reprocesa")
+                respuesta_texto, opciones = _respuesta_de_turno(
+                    mensajes_anteriores,
+                    indice + 1,
+                    valores_previos.get("ultimas_opciones"),
+                    valores_previos.get("service_id"),
+                    valores_previos.get("employee_id"),
+                )
+                return (respuesta_texto, opciones) if respuesta_texto else (MENSAJE_PROCESANDO, None)
+
+        entrada = {
+            "messages": [HumanMessage(content=mensaje, id=client_message_id)],
+            "business_id": business_id,
+            "session_id": session_id,
+        }
+        if employee_id:
+            entrada["employee_id"] = employee_id
+            entrada["employee_fijo"] = True
+
+        if not valores_previos:
+            # Primer turno de este thread: varias tools (transferir_a_equipo,
+            # escalar_por_confusion, crear_cita, consultar_servicios_disponibles,
+            # etc.) leen client_phone/employee_id via InjectedState, que lanza
+            # KeyError si esa clave nunca se escribio en el estado - ej. el
+            # cliente pide hablar con un asesor antes de dar su numero, o
+            # pregunta por servicios antes de elegir empleado en el chat
+            # general. setdefault no pisa el employee_id real si ya se puso
+            # arriba (chat de un empleado fijo).
+            entrada.setdefault("client_phone", None)
+            entrada.setdefault("employee_id", None)
+
         resultado = GRAPH.invoke(entrada, config=config)
     except GraphRecursionError:
-        business = get_business_by_id(business_id)
-        return MENSAJE_LIMITE_RONDAS + "\n\n" + construir_mensaje_contacto_humano(business), None
+        try:
+            business = get_business_by_id(business_id)
+            return MENSAJE_LIMITE_RONDAS + "\n\n" + construir_mensaje_contacto_humano(business), None
+        except Exception:
+            return MENSAJE_LIMITE_RONDAS, None
     except Exception as e:
-        # Cualquier excepcion no prevista dentro del grafo (bug en una tool,
-        # timeout de base de datos, etc.) se escapa hasta aqui sin que nada
-        # la haya capturado antes: sin este catch-all el endpoint de chat
-        # respondia un 500 crudo y el widget quedaba roto.
-        print(f"Error inesperado invocando el grafo del agente: {e}")
-        business = get_business_by_id(business_id)
-        return MENSAJE_ERROR_TECNICO + "\n\n" + construir_mensaje_contacto_humano(business), None
+        # Cualquier excepcion no prevista (bug en una tool, base de datos
+        # del checkpointer sin conexiones disponibles, etc.): mensaje amable
+        # en vez de un 500 crudo que deja el widget roto.
+        print(f"Error inesperado en el chat (thread {business_id}:{session_id}): {type(e).__name__}: {e}")
+        return _mensaje_error_tecnico(business_id), None
 
-    mensajes_nuevos = resultado["messages"][mensajes_previos:]
-    respuesta_texto = next(
-        (m.content for m in reversed(resultado["messages"]) if isinstance(m, AIMessage) and m.content), ""
-    )
-    textos_cliente = [str(m.content) for m in resultado["messages"] if isinstance(m, HumanMessage)]
-    opciones = _extraer_opciones(
-        mensajes_nuevos,
+    respuesta_texto, opciones = _respuesta_de_turno(
+        resultado["messages"],
+        len(mensajes_anteriores),
         resultado.get("ultimas_opciones"),
         resultado.get("service_id"),
         resultado.get("employee_id"),
-        respuesta_texto,
-        textos_cliente,
     )
-
     if respuesta_texto:
         return respuesta_texto, opciones
     return MENSAJE_ERROR_TECNICO, None
